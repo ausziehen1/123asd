@@ -1,4 +1,4 @@
-// ESP32-S3 HID Recoil Engine — R3.3 safety / variable-dt correction.
+// ESP32-S3 HID Recoil Engine — R3.3.1 Arduino IDE 1.x compatibility correction.
 // Базовая баллистика, оба банка, пользовательские кнопки и HID REPORT не менялись.
 // НЕ проверено в физической сборке: сначала испытания на отключенном от игры стенде.
 // Примечание: USB VID/PID/строки ниже сохранены как в исходнике; используйте свои
@@ -132,10 +132,6 @@ static_assert(EMA_SMOOTH_ALPHA > 0.0f && EMA_SMOOTH_ALPHA <= 1.0f,
 #define FATIGUE_FRESH_MULT       0.60f 
 #define FATIGUE_MAX_MULT         1.40f 
 
-struct BulletTarget {
-    float x;
-    float y;
-};
 
 // ================= 16-БИТНЫЙ ДЕСКРИПТОР И КЛАСС HID =================
 #define REPORT_ID_MOUSE 1
@@ -717,10 +713,6 @@ DRAM_ATTR const float MULTIPLIERS[15] = {
     2.14f, 2.36f, 2.57f, 2.79f, 3.00f
 };
 
-enum CombatMode : int {
-    MODE_CLOSE = 0,
-    MODE_LONG  = 1
-};
 
 // Один 32-битный атомарный снимок: нет смешивания старого MODE и нового PROFILE.
 // Только Core 0 записывает настройки (в setup() до старта задач и затем в ControlTask).
@@ -731,11 +723,6 @@ static constexpr uint32_t CFG_MODE_MASK = 0x10u;
 static constexpr uint32_t CFG_ENABLED_MASK = 0x20u;
 static_assert(ATOMIC_INT_LOCK_FREE == 2, "ESP32-S3 requires lock-free 32-bit atomics");
 
-struct ControlSnapshot {
-    int profile;
-    CombatMode mode;
-    bool enabled;
-};
 
 static inline uint32_t packControl(int profile, CombatMode mode, bool enabled) {
     return (uint32_t)(profile & 0x0F) |
@@ -802,14 +789,6 @@ DRAM_ATTR EngineDiagnosticCounters g_engineDiag;
 // Consistent per-second diagnostic snapshot. All payload values are atomic;
 // sequence marks an in-progress publication. Core 0 retries on concurrent write.
 static std::atomic<uint32_t> g_r32DiagSequence{0};
-struct R32DiagSnapshot {
-    uint32_t ticks, minDtUs, maxDtUs, lateTicks, maxLatenessUs;
-    uint32_t hidQueued, hidBusy, hidRejected, hidDrops, hidUnmountedTicks;
-    uint32_t hidMaxBusyStreak, hidMaxPendingAgeUs, hidMaxPendingAbs;
-    uint32_t warmStarts, springStarts, watchdogActive;
-    uint32_t schedulerMissedSlots, hidReadyAfterBusy, hidMaxQueuedAgeUs;
-    uint32_t hidTransferCompleted, hidTransferFailed;
-};
 
 static bool r32ReadDiagSnapshot(R32DiagSnapshot& s) {
     for (unsigned attempt=0; attempt<4; ++attempt) {
@@ -1037,9 +1016,6 @@ static inline BulletTarget __attribute__((always_inline)) evalCatmullRom(
 // At EXACTLY 1000 us all coefficients equal R3.1, including noise amplitude.
 // OU drift: rho(dt)=(1-a)^(dt/1000); stationary variance kept by scaling innovation.
 // This preserves drift-state variance/correlation, NOT exact bitwise HID output.
-struct R32TimeDynamics {
-    float emaAlpha, mirrorAlpha, driftRho, driftInnovation, microScale;
-};
 static constexpr uint32_t R32_DT_TABLE_MIN_US = 750;
 static constexpr uint32_t R32_DT_TABLE_MAX_US = 1250;
 static constexpr uint32_t R32_DT_TABLE_STEP_US = 25;
@@ -1094,11 +1070,6 @@ static inline R32TimeDynamics r32TimeDynamics(uint32_t dtUs) {
 }
 
 // -------- R3.2: Catmull-Rom polynomial cached per shot, no change to pattern data --------
-struct R32CachedSpline {
-    int shot=-1, pattern=-1, mode=-1;
-    bool sustain=false;
-    BulletTarget a{}, b{}, c{}, d{};
-};
 
 static inline int r32NeighborIndex(int shot, int offset, bool sustain) {
 #if R32_WRAP_TANGENT_FIX
@@ -2036,7 +2007,7 @@ void ControlTask(void *pvParameters) {
     }
 }
 
-[[noreturn]] void failStartup() {
+void failStartup() {
     setControlEnabled(false);
     g_engineFault.store(true, std::memory_order_release);
     for (;;) {

@@ -2,7 +2,7 @@
 +++ firmware/RecoilEngine/RecoilEngine.ino
 @@ -1,4 +1,4 @@
 -// ESP32-S3 HID Recoil Engine — R2 reliability / observability revision.
-+// ESP32-S3 HID Recoil Engine — R3.3 safety / variable-dt correction.
++// ESP32-S3 HID Recoil Engine — R3.3.1 Arduino IDE 1.x compatibility correction.
  // Базовая баллистика, оба банка, пользовательские кнопки и HID REPORT не менялись.
  // НЕ проверено в физической сборке: сначала испытания на отключенном от игры стенде.
  // Примечание: USB VID/PID/строки ниже сохранены как в исходнике; используйте свои
@@ -39,7 +39,7 @@
  #endif
  #ifndef R32_AVOID_CONSECUTIVE_PATTERN
  #define R32_AVOID_CONSECUTIVE_PATTERN 1 // new cold start differs from previous cold pattern
-@@ -117,7 +125,9 @@
+@@ -117,15 +125,13 @@
  #define JITTER_MICRO_AMP_PX      0.10f 
  #define JITTER_DRIFT_AMP_PX      0.08f 
  #define JITTER_DRIFT_ALPHA       0.06f 
@@ -50,7 +50,15 @@
  
  #define FATIGUE_FRESH_MULT       0.60f 
  #define FATIGUE_MAX_MULT         1.40f 
-@@ -174,6 +184,7 @@
+ 
+-struct BulletTarget {
+-    float x;
+-    float y;
+-};
+ 
+ // ================= 16-БИТНЫЙ ДЕСКРИПТОР И КЛАСС HID =================
+ #define REPORT_ID_MOUSE 1
+@@ -174,6 +180,7 @@
      int8_t  wheel;
  };
  #pragma pack(pop)
@@ -58,7 +66,45 @@
  
  USBHID hid;
  
-@@ -834,7 +845,7 @@
+@@ -706,10 +713,6 @@
+     2.14f, 2.36f, 2.57f, 2.79f, 3.00f
+ };
+ 
+-enum CombatMode : int {
+-    MODE_CLOSE = 0,
+-    MODE_LONG  = 1
+-};
+ 
+ // Один 32-битный атомарный снимок: нет смешивания старого MODE и нового PROFILE.
+ // Только Core 0 записывает настройки (в setup() до старта задач и затем в ControlTask).
+@@ -720,11 +723,6 @@
+ static constexpr uint32_t CFG_ENABLED_MASK = 0x20u;
+ static_assert(ATOMIC_INT_LOCK_FREE == 2, "ESP32-S3 requires lock-free 32-bit atomics");
+ 
+-struct ControlSnapshot {
+-    int profile;
+-    CombatMode mode;
+-    bool enabled;
+-};
+ 
+ static inline uint32_t packControl(int profile, CombatMode mode, bool enabled) {
+     return (uint32_t)(profile & 0x0F) |
+@@ -791,14 +789,6 @@
+ // Consistent per-second diagnostic snapshot. All payload values are atomic;
+ // sequence marks an in-progress publication. Core 0 retries on concurrent write.
+ static std::atomic<uint32_t> g_r32DiagSequence{0};
+-struct R32DiagSnapshot {
+-    uint32_t ticks, minDtUs, maxDtUs, lateTicks, maxLatenessUs;
+-    uint32_t hidQueued, hidBusy, hidRejected, hidDrops, hidUnmountedTicks;
+-    uint32_t hidMaxBusyStreak, hidMaxPendingAgeUs, hidMaxPendingAbs;
+-    uint32_t warmStarts, springStarts, watchdogActive;
+-    uint32_t schedulerMissedSlots, hidReadyAfterBusy, hidMaxQueuedAgeUs;
+-    uint32_t hidTransferCompleted, hidTransferFailed;
+-};
+ 
+ static bool r32ReadDiagSnapshot(R32DiagSnapshot& s) {
+     for (unsigned attempt=0; attempt<4; ++attempt) {
+@@ -834,7 +824,7 @@
  
  // The stock Arduino-ESP32 USBHID.cpp owns tud_hid_report_complete_cb() itself.
  // Defining that callback here causes duplicate symbols. Optional core adapter is
@@ -67,7 +113,7 @@
  #if R32_USB_COMPLETION_HOOK
  extern "C" void recoil_hid_transfer_complete(uint8_t instance, uint8_t const* report, uint16_t len) {
      if (instance == 0 && report && len == sizeof(MouseReport16) + 1 && report[0] == REPORT_ID_MOUSE)
-@@ -858,8 +869,39 @@
+@@ -858,8 +848,39 @@
  
  TaskHandle_t engineTaskHandle  = NULL;
  TaskHandle_t controlTaskHandle = NULL;
@@ -107,16 +153,31 @@
  bool needSaveProfile = false;
  bool needSaveMode = false;
  unsigned long saveSettingsTime = 0;
-@@ -994,7 +1036,7 @@
+@@ -994,10 +1015,7 @@
  // -------- R3.2: time domain normalization --------
  // At EXACTLY 1000 us all coefficients equal R3.1, including noise amplitude.
  // OU drift: rho(dt)=(1-a)^(dt/1000); stationary variance kept by scaling innovation.
 -// This preserves first-order variance/correlation, NOT exact bitwise HID output.
+-struct R32TimeDynamics {
+-    float emaAlpha, mirrorAlpha, driftRho, driftInnovation, microScale;
+-};
 +// This preserves drift-state variance/correlation, NOT exact bitwise HID output.
- struct R32TimeDynamics {
-     float emaAlpha, mirrorAlpha, driftRho, driftInnovation, microScale;
- };
-@@ -1167,9 +1209,16 @@
+ static constexpr uint32_t R32_DT_TABLE_MIN_US = 750;
+ static constexpr uint32_t R32_DT_TABLE_MAX_US = 1250;
+ static constexpr uint32_t R32_DT_TABLE_STEP_US = 25;
+@@ -1052,11 +1070,6 @@
+ }
+ 
+ // -------- R3.2: Catmull-Rom polynomial cached per shot, no change to pattern data --------
+-struct R32CachedSpline {
+-    int shot=-1, pattern=-1, mode=-1;
+-    bool sustain=false;
+-    BulletTarget a{}, b{}, c{}, d{};
+-};
+ 
+ static inline int r32NeighborIndex(int shot, int offset, bool sustain) {
+ #if R32_WRAP_TANGENT_FIX
+@@ -1167,9 +1180,16 @@
      }
      previousEngineLedState = engineState;
  
@@ -134,7 +195,7 @@
          writeLedIfChanged(0, 0, 0);
      } else if (engineState == ENGINE_LED_CLOSE) {
          writeLedIfChanged(0, 0, 70);
-@@ -1217,26 +1266,24 @@
+@@ -1217,26 +1237,24 @@
      }
  };
  
@@ -176,7 +237,7 @@
  }
  
  // ================= МОНОПОЛЬНАЯ ЗАДАЧА ДВИЖКА НА CORE 1 =================
-@@ -1290,7 +1337,7 @@
+@@ -1290,7 +1308,7 @@
      float smooth_y = 0.0f;
      float drift_x = 0.0f;
      float drift_y = 0.0f;
@@ -185,7 +246,7 @@
      #if (ENGINE_DIAGNOSTICS == 1)
      uint32_t consecutiveHidBusyTicks = 0;
      #endif
-@@ -1340,8 +1387,8 @@
+@@ -1340,8 +1358,8 @@
          const float f = fmaxf(fabsf(x), fabsf(y));
          const uint32_t pendingAbs = (f > (float)UINT32_MAX) ? UINT32_MAX : (uint32_t)f;
          if (pendingAbs > diagMaxPendingAbs) diagMaxPendingAbs = pendingAbs;
@@ -196,7 +257,7 @@
              const uint32_t ageUs = (age > UINT32_MAX) ? UINT32_MAX : (uint32_t)age;
              if (ageUs > diagMaxPendingAgeUs) diagMaxPendingAgeUs = ageUs;
          }
-@@ -1353,13 +1400,7 @@
+@@ -1353,13 +1371,7 @@
      #endif
      for (;;) {
          uint64_t nowUs = esp_timer_get_time();
@@ -211,7 +272,7 @@
  
          nowUs = esp_timer_get_time();
          #if (ENGINE_DIAGNOSTICS == 1)
-@@ -1370,7 +1411,7 @@
+@@ -1370,7 +1382,7 @@
              diagMaxLateUs = (lateUs > UINT32_MAX) ? UINT32_MAX : (uint32_t)lateUs;
          #endif
  #if R32_ABSOLUTE_SCHEDULER
@@ -220,7 +281,7 @@
          // A late tick cannot push every future tick late. Skip elapsed deadlines;
          // NEVER burst HID reports to "replay" missed polls.
          nextWakeTimeUs += generateNextTickDurationUs();
-@@ -1437,6 +1478,7 @@
+@@ -1437,6 +1449,7 @@
          #endif
          // Длинный пропуск НЕ превращаем искусственно в ровно 1 мс.
          // Ограничение 5 мс защищает от большого одноразового скачка курсора.
@@ -228,7 +289,7 @@
          if (dtUs == 0ULL) dtUs = BASE_TICK_US;
          if (dtUs > 5000ULL) dtUs = 5000ULL;
          const R32TimeDynamics timeDynamics = r32TimeDynamics((uint32_t)dtUs);
-@@ -1463,6 +1505,55 @@
+@@ -1463,6 +1476,55 @@
          if (requireStartupRelease && !rawPressed && !debouncedTrigger &&
              (nowUs - lastDebounceChangeUs >= DEBOUNCE_TRIGGER_US)) {
              requireStartupRelease = false;
@@ -284,7 +345,7 @@
          }
  
          if (debouncedTrigger && !buttonPhysicallyHeld && !requireStartupRelease) {
-@@ -1507,7 +1598,7 @@
+@@ -1507,7 +1569,7 @@
                  rem_x = rem_y = 0.0f;
                  smooth_x = smooth_y = 0.0f;
                  drift_x = drift_y = 0.0f;
@@ -293,7 +354,7 @@
                  #if (ENGINE_DIAGNOSTICS == 1)
                  consecutiveHidBusyTicks = 0;
                  #endif
-@@ -1573,6 +1664,9 @@
+@@ -1573,6 +1635,9 @@
          if (!isRecoilActive && spring.active) {
              if (!Mouse16.mounted()) {
                  spring.active = false; // Отключен USB — не копим возврат до переподключения.
@@ -303,7 +364,7 @@
              } else {
                  const uint64_t passed = nowUs - spring.startUs;
                  const float u = (float)passed / (float)TAP_SPRINGBACK_TIME_US;
-@@ -1602,7 +1696,7 @@
+@@ -1602,7 +1667,7 @@
                  }
                  if ((passed >= TAP_SPRINGBACK_TIME_US &&
                       spring.queuedX == spring.totalX && spring.queuedY == spring.totalY) ||
@@ -312,7 +373,7 @@
                      spring.active = false;
                  }
              }
-@@ -1707,7 +1801,8 @@
+@@ -1707,7 +1772,8 @@
                                     std::memory_order_relaxed);
          }
  
@@ -322,7 +383,7 @@
          const float jitterActive = (currentMultY > 0.001f) ? tapEnvelope : 0.0f;
          const float fatigueFactor = computeMuscleFatigueFactor(idx1, t, inSustainLoop);
          const float dynamicMicroAmp = JITTER_MICRO_AMP_PX * fatigueFactor;
-@@ -1720,19 +1815,29 @@
+@@ -1720,19 +1786,29 @@
          const float micro_x = randomCenteredFloat() * dynamicMicroAmp * timeDynamics.microScale;
          const float micro_y = randomCenteredFloat() * dynamicMicroAmp * timeDynamics.microScale;
  
@@ -357,7 +418,7 @@
              #if (ENGINE_DIAGNOSTICS == 1)
              consecutiveHidBusyTicks = 0;
              ++diagUnmounted;
-@@ -1747,13 +1852,13 @@
+@@ -1747,13 +1823,13 @@
              #endif
              // Endpoint занят штатным предыдущим пакетом — сохранить остаток до
              // следующего тика, не превращая это в потерянное движение.
@@ -375,7 +436,7 @@
                  #if (ENGINE_DIAGNOSTICS == 1)
                  ++diagDrops;
                  #endif
-@@ -1764,6 +1869,30 @@
+@@ -1764,6 +1840,30 @@
          if (consecutiveHidBusyTicks > 0) ++diagReadyAfterBusy; // proxy, not USB completion!
          consecutiveHidBusyTicks = 0;
          #endif
@@ -406,7 +467,7 @@
          const int send_x = (int)__builtin_lrintf(rem_x);
          const int send_y = (int)__builtin_lrintf(rem_y);
          if (send_x != 0 || send_y != 0) {
-@@ -1781,20 +1910,24 @@
+@@ -1781,20 +1881,24 @@
                  #endif
                  rem_x -= (float)out_x;
                  rem_y -= (float)out_y;
@@ -438,7 +499,7 @@
                      #if (ENGINE_DIAGNOSTICS == 1)
                      ++diagDrops;
                      #endif
-@@ -1812,50 +1945,25 @@
+@@ -1812,50 +1916,25 @@
      up.init(digitalRead(BTN_PROF_UP_PIN) == LOW, now);
      down.init(digitalRead(BTN_PROF_DOWN_PIN) == LOW, now);
  
@@ -497,7 +558,7 @@
          }
  
          const uint8_t upEdge = up.update(digitalRead(BTN_PROF_UP_PIN) == LOW, now);
-@@ -1881,8 +1989,15 @@
+@@ -1881,8 +1960,15 @@
  
          const bool physicallyShooting = gpio_get_level((gpio_num_t)TRIGGER_PIN) == 0;
          if ((needSaveProfile || needSaveMode) &&
@@ -514,11 +575,11 @@
          }
  
          // Compute one authoritative LED color after updating all button states.
-@@ -1921,6 +2036,15 @@
+@@ -1921,6 +2007,15 @@
      }
  }
  
-+[[noreturn]] void failStartup() {
++void failStartup() {
 +    setControlEnabled(false);
 +    g_engineFault.store(true, std::memory_order_release);
 +    for (;;) {
@@ -530,7 +591,7 @@
  void setup() {
      #if (ENGINE_DIAG_UART == 1)
      Serial0.begin(115200);
-@@ -1945,12 +2069,13 @@
+@@ -1945,12 +2040,13 @@
  
      r32InitDynamics();
      Mouse16.begin();
@@ -550,7 +611,7 @@
      CombatMode initMode = (rawMode == MODE_LONG) ? MODE_LONG : MODE_CLOSE;
  
      // Одна атомарная публикация согласованной стартовой конфигурации.
-@@ -1958,18 +2083,19 @@
+@@ -1958,18 +2054,19 @@
  
      setProfileColor(initProf);
  
@@ -577,7 +638,7 @@
      BaseType_t controlCreated = pdFAIL;
      if (engineCreated == pdPASS && engineTaskHandle != NULL) {
          controlCreated = xTaskCreatePinnedToCore(
-@@ -1978,13 +2104,7 @@
+@@ -1978,13 +2075,7 @@
      if (engineCreated != pdPASS || engineTaskHandle == NULL ||
          controlCreated != pdPASS || controlTaskHandle == NULL) {
          // An error must not leave a working-looking HID engine with no buttons.

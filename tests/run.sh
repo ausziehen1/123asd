@@ -13,3 +13,7 @@ export ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0"
     -Wno-unused-parameter -Wno-unused-variable -fsanitize=address,undefined -g \
     tests/test_engine_integration.cpp -o "$test_build_dir/integration"
 "$test_build_dir/integration"
+"$cxx" -std=c++11 -Itests/stubs -Wall -Wextra -Wno-unused-function \
+    -Wno-unused-parameter -Wno-unused-variable -fsyntax-only \
+    tests/test_arduino_prototypes.cpp
+printf '%s\n' 'PASS: Arduino IDE early-prototype compilation regression'

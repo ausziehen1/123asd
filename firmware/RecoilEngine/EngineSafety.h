@@ -1,6 +1,44 @@
 #pragma once
 #include <stdint.h>
 
+// Arduino IDE 1.x inserts function prototypes before later sketch-local types.
+// Shared signature types must be visible from an included header at that point.
+// Definitions are unchanged; this is a source-layout fix only.
+struct BulletTarget {
+    float x;
+    float y;
+};
+
+enum CombatMode : int {
+    MODE_CLOSE = 0,
+    MODE_LONG  = 1
+};
+
+struct ControlSnapshot {
+    int profile;
+    CombatMode mode;
+    bool enabled;
+};
+
+struct R32DiagSnapshot {
+    uint32_t ticks, minDtUs, maxDtUs, lateTicks, maxLatenessUs;
+    uint32_t hidQueued, hidBusy, hidRejected, hidDrops, hidUnmountedTicks;
+    uint32_t hidMaxBusyStreak, hidMaxPendingAgeUs, hidMaxPendingAbs;
+    uint32_t warmStarts, springStarts, watchdogActive;
+    uint32_t schedulerMissedSlots, hidReadyAfterBusy, hidMaxQueuedAgeUs;
+    uint32_t hidTransferCompleted, hidTransferFailed;
+};
+
+struct R32TimeDynamics {
+    float emaAlpha, mirrorAlpha, driftRho, driftInnovation, microScale;
+};
+
+struct R32CachedSpline {
+    int shot=-1, pattern=-1, mode=-1;
+    bool sustain=false;
+    BulletTarget a{}, b{}, c{}, d{};
+};
+
 namespace recoil {
 // State is a rate in counts per nominal tick. The displacement correction is a
 // telescoping state difference: variable dt cannot manufacture extra distance.
