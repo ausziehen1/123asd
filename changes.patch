@@ -1,0 +1,594 @@
+--- original/645645674.txt
++++ firmware/RecoilEngine/RecoilEngine.ino
+@@ -1,4 +1,4 @@
+-// ESP32-S3 HID Recoil Engine — R2 reliability / observability revision.
++// ESP32-S3 HID Recoil Engine — R3.3 safety / variable-dt correction.
+ // Базовая баллистика, оба банка, пользовательские кнопки и HID REPORT не менялись.
+ // НЕ проверено в физической сборке: сначала испытания на отключенном от игры стенде.
+ // Примечание: USB VID/PID/строки ниже сохранены как в исходнике; используйте свои
+@@ -20,6 +20,14 @@
+ #include <atomic>
+ #include <cmath>
+ #include <stdint.h>
++#include "EngineSafety.h"
++
++#if !defined(CONFIG_IDF_TARGET_ESP32S3) || ARDUINO_USB_MODE != 0
++#error "Requires ESP32-S3 native USB OTG (USB Mode: USB-OTG / TinyUSB)"
++#endif
++#if CONFIG_FREERTOS_UNICORE
++#error "This firmware requires both ESP32-S3 cores"
++#endif
+ 
+ // R3.2: selected deep optimizations with switchable math changes.
+ // R3.1 remains the calibration reference. Hardware validation required.
+@@ -57,7 +65,7 @@
+ #define R32_SPLINE_CACHE          1   // polynomial coefficients once per segment
+ #endif
+ #ifndef R32_ABSOLUTE_SCHEDULER
+-#define R32_ABSOLUTE_SCHEDULER    1   // option A: busy-wait + anchored deadlines
++#define R32_ABSOLUTE_SCHEDULER    1   // anchored deadlines; timer wake + short spin tail
+ #endif
+ #ifndef R32_TIME_NORMALIZATION
+ #define R32_TIME_NORMALIZATION   1   // time-scaled EMA/drift/mirror/micro noise
+@@ -72,7 +80,7 @@
+ #define R32_RNG_TEST_SEED        0xC001CAFEu
+ #endif
+ #ifndef R32_USB_COMPLETION_HOOK
+-#define R32_USB_COMPLETION_HOOK  0   // 1 ONLY with the bundled Arduino-core hook patch
++#define R32_USB_COMPLETION_HOOK  0   // 1 ONLY with an external Arduino-core hook adapter
+ #endif
+ #ifndef R32_AVOID_CONSECUTIVE_PATTERN
+ #define R32_AVOID_CONSECUTIVE_PATTERN 1 // new cold start differs from previous cold pattern
+@@ -117,7 +125,9 @@
+ #define JITTER_MICRO_AMP_PX      0.10f 
+ #define JITTER_DRIFT_AMP_PX      0.08f 
+ #define JITTER_DRIFT_ALPHA       0.06f 
+-#define EMA_SMOOTH_ALPHA         0.30f 
++#define EMA_SMOOTH_ALPHA         0.30f
++static_assert(EMA_SMOOTH_ALPHA > 0.0f && EMA_SMOOTH_ALPHA <= 1.0f,
++              "EMA alpha must be in (0,1]"); 
+ 
+ #define FATIGUE_FRESH_MULT       0.60f 
+ #define FATIGUE_MAX_MULT         1.40f 
+@@ -174,6 +184,7 @@
+     int8_t  wheel;
+ };
+ #pragma pack(pop)
++static_assert(sizeof(MouseReport16) == 6, "HID report layout mismatch");
+ 
+ USBHID hid;
+ 
+@@ -834,7 +845,7 @@
+ 
+ // The stock Arduino-ESP32 USBHID.cpp owns tud_hid_report_complete_cb() itself.
+ // Defining that callback here causes duplicate symbols. Optional core adapter is
+-// documented in USB_COMPLETION_HOOK.md; DO NOT enable without installing that adapter.
++// not supplied here; leave disabled unless installing a compatible core adapter.
+ #if R32_USB_COMPLETION_HOOK
+ extern "C" void recoil_hid_transfer_complete(uint8_t instance, uint8_t const* report, uint16_t len) {
+     if (instance == 0 && report && len == sizeof(MouseReport16) + 1 && report[0] == REPORT_ID_MOUSE)
+@@ -858,8 +869,39 @@
+ 
+ TaskHandle_t engineTaskHandle  = NULL;
+ TaskHandle_t controlTaskHandle = NULL;
++esp_timer_handle_t engineWakeTimer = nullptr;
++std::atomic<bool> g_engineFault{false};
++std::atomic<bool> g_flashSaveRequested{false};
++std::atomic<bool> g_flashSaveGranted{false};
++
++// Timer service runs on Core 0 in the pinned build; this callback never sends HID.
++void engineWakeCallback(void*) {
++    if (engineTaskHandle != nullptr) xTaskNotifyGive(engineTaskHandle);
++}
++
++// Only a short final tail is busy-waited. The engine blocks between ticks so
++// Core 1 idle/system tasks remain schedulable and its idle watchdog stays enabled.
++void waitForEngineDeadline(uint64_t deadlineUs) {
++    uint64_t now = esp_timer_get_time();
++    if (deadlineUs > now + 75ULL) {
++        (void)ulTaskNotifyTake(pdTRUE, 0); // discard an obsolete wake notification
++        const esp_err_t armed = esp_timer_start_once(engineWakeTimer, deadlineUs - now - 50ULL);
++        if (armed != ESP_OK) {
++            g_engineLedState.store(ENGINE_LED_IDLE, std::memory_order_relaxed);
++            g_engineFault.store(true, std::memory_order_release);
++            vTaskSuspend(nullptr); // fail closed; ControlTask displays the fault
++            return;
++        }
++        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
++    }
++    while ((now = esp_timer_get_time()) < deadlineUs) {
++        if (deadlineUs - now > 4ULL) esp_rom_delay_us(1);
++    }
++}
+ 
+ Preferences prefs;
++bool settingsStoreReady = false;
++bool settingsSaveFailed = false;
+ bool needSaveProfile = false;
+ bool needSaveMode = false;
+ unsigned long saveSettingsTime = 0;
+@@ -994,7 +1036,7 @@
+ // -------- R3.2: time domain normalization --------
+ // At EXACTLY 1000 us all coefficients equal R3.1, including noise amplitude.
+ // OU drift: rho(dt)=(1-a)^(dt/1000); stationary variance kept by scaling innovation.
+-// This preserves first-order variance/correlation, NOT exact bitwise HID output.
++// This preserves drift-state variance/correlation, NOT exact bitwise HID output.
+ struct R32TimeDynamics {
+     float emaAlpha, mirrorAlpha, driftRho, driftInnovation, microScale;
+ };
+@@ -1167,9 +1209,16 @@
+     }
+     previousEngineLedState = engineState;
+ 
++    if (g_engineFault.load(std::memory_order_acquire)) {
++        writeLedIfChanged(((now / 150UL) & 1u) ? 80 : 0, 0, 0);
++        return;
++    }
+     // Highest priority: deliberate feedback for the physical FN command.
+     if (blinker.active) return;
+-    if (!readControl().enabled) {
++    if (settingsSaveFailed) {
++        const bool on = ((now / 250UL) & 1u) != 0;
++        writeLedIfChanged(on ? 60 : 0, on ? 20 : 0, 0);
++    } else if (!readControl().enabled) {
+         writeLedIfChanged(0, 0, 0);
+     } else if (engineState == ENGINE_LED_CLOSE) {
+         writeLedIfChanged(0, 0, 70);
+@@ -1217,26 +1266,24 @@
+     }
+ };
+ 
+-void saveConfigSafely() {
++// Called only after EngineTask grants an idle flash window. Keep failed writes
++// pending, show a visible warning, and retry later without writing on every loop.
++bool saveConfigSafely() {
++    if (!settingsStoreReady) settingsStoreReady = prefs.begin("recoil_cfg", false);
++    if (!settingsStoreReady) { settingsSaveFailed = true; return false; }
+     const ControlSnapshot saved = readControl();
+-    int profToSave = constrain(saved.profile, 0, 14);
+-    int modeToSave = saved.mode;
+-
+     if (needSaveProfile) {
+-        int storedProf = prefs.getInt("prof_idx", -1);
+-        if (storedProf != profToSave) {
+-            prefs.putInt("prof_idx", profToSave);
+-        }
+-        needSaveProfile = false;
+-    }
+-
++        const int profile = constrain(saved.profile, 0, 14);
++        if (prefs.getInt("prof_idx", -1) == profile ||
++            prefs.putInt("prof_idx", profile) == sizeof(int32_t)) needSaveProfile = false;
++    }
+     if (needSaveMode) {
+-        int storedMode = prefs.getInt("mode_idx", -1);
+-        if (storedMode != modeToSave) {
+-            prefs.putInt("mode_idx", modeToSave);
+-        }
+-        needSaveMode = false;
+-    }
++        const int mode = saved.mode;
++        if (prefs.getInt("mode_idx", -1) == mode ||
++            prefs.putInt("mode_idx", mode) == sizeof(int32_t)) needSaveMode = false;
++    }
++    settingsSaveFailed = needSaveProfile || needSaveMode;
++    return !settingsSaveFailed;
+ }
+ 
+ // ================= МОНОПОЛЬНАЯ ЗАДАЧА ДВИЖКА НА CORE 1 =================
+@@ -1290,7 +1337,7 @@
+     float smooth_y = 0.0f;
+     float drift_x = 0.0f;
+     float drift_y = 0.0f;
+-    uint64_t hidBlockedSinceUs = 0;
++    recoil::HidBacklogGuard hidBacklog(HID_BUSY_DROP_US);
+     #if (ENGINE_DIAGNOSTICS == 1)
+     uint32_t consecutiveHidBusyTicks = 0;
+     #endif
+@@ -1340,8 +1387,8 @@
+         const float f = fmaxf(fabsf(x), fabsf(y));
+         const uint32_t pendingAbs = (f > (float)UINT32_MAX) ? UINT32_MAX : (uint32_t)f;
+         if (pendingAbs > diagMaxPendingAbs) diagMaxPendingAbs = pendingAbs;
+-        if (hidBlockedSinceUs > 0) {
+-            const uint64_t age = now - hidBlockedSinceUs;
++        if (hidBacklog.blockedSinceUs > 0) {
++            const uint64_t age = now - hidBacklog.blockedSinceUs;
+             const uint32_t ageUs = (age > UINT32_MAX) ? UINT32_MAX : (uint32_t)age;
+             if (ageUs > diagMaxPendingAgeUs) diagMaxPendingAgeUs = ageUs;
+         }
+@@ -1353,13 +1400,7 @@
+     #endif
+     for (;;) {
+         uint64_t nowUs = esp_timer_get_time();
+-        if (nowUs < nextWakeTimeUs) {
+-            while ((nowUs = esp_timer_get_time()) < nextWakeTimeUs) {
+-                const uint64_t remainingUs = nextWakeTimeUs - nowUs;
+-                if (remainingUs > 50ULL) esp_rom_delay_us(25);
+-                else if (remainingUs > 4ULL) esp_rom_delay_us(1);
+-            }
+-        }
++        waitForEngineDeadline(nextWakeTimeUs);
+ 
+         nowUs = esp_timer_get_time();
+         #if (ENGINE_DIAGNOSTICS == 1)
+@@ -1370,7 +1411,7 @@
+             diagMaxLateUs = (lateUs > UINT32_MAX) ? UINT32_MAX : (uint32_t)lateUs;
+         #endif
+ #if R32_ABSOLUTE_SCHEDULER
+-        // Option A: still busy-wait, but deadlines are anchored to their own timeline.
++        // Deadlines are anchored to their own timeline; the timer releases Core 1.
+         // A late tick cannot push every future tick late. Skip elapsed deadlines;
+         // NEVER burst HID reports to "replay" missed polls.
+         nextWakeTimeUs += generateNextTickDurationUs();
+@@ -1437,6 +1478,7 @@
+         #endif
+         // Длинный пропуск НЕ превращаем искусственно в ровно 1 мс.
+         // Ограничение 5 мс защищает от большого одноразового скачка курсора.
++        const bool longTimingPause = dtUs >= HID_BUSY_DROP_US;
+         if (dtUs == 0ULL) dtUs = BASE_TICK_US;
+         if (dtUs > 5000ULL) dtUs = 5000ULL;
+         const R32TimeDynamics timeDynamics = r32TimeDynamics((uint32_t)dtUs);
+@@ -1463,6 +1505,55 @@
+         if (requireStartupRelease && !rawPressed && !debouncedTrigger &&
+             (nowUs - lastDebounceChangeUs >= DEBOUNCE_TRIGGER_US)) {
+             requireStartupRelease = false;
++        }
++
++        if (longTimingPause) {
++            // No old filter tail, debt, or return may survive a stalled engine.
++            spring.active = false;
++            rem_x = rem_y = smooth_x = smooth_y = 0.0f;
++            catchupDebtX = catchupDebtY = catchupCarryX = catchupCarryY = 0.0f;
++            hidBacklog.reset();
++        }
++
++        // Core 0 requests NVS work; Core 1 acknowledges only when all motion,
++        // including spring-back, has stopped. No engine work runs during the write.
++        if (g_flashSaveRequested.load(std::memory_order_acquire) &&
++            !isRecoilActive && !spring.active && !rawPressed && !debouncedTrigger) {
++            g_flashSaveGranted.store(true, std::memory_order_release);
++            while (g_flashSaveRequested.load(std::memory_order_acquire)) {
++#if ENGINE_TASK_WDT
++                if (engineWdtRegistered) esp_task_wdt_reset();
++#endif
++                vTaskDelay(1);
++            }
++            g_flashSaveGranted.store(false, std::memory_order_release);
++            nowUs = esp_timer_get_time();
++            lastTickTimeUs = nowUs;
++            nextWakeTimeUs = nowUs + BASE_TICK_US;
++            rawLastReading = gpio_get_level((gpio_num_t)TRIGGER_PIN) == 0;
++            debouncedTrigger = rawLastReading;
++            buttonPhysicallyHeld = false;
++            requireStartupRelease = rawLastReading;
++            lastDebounceChangeUs = nowUs;
++            continue;
++        }
++
++        // Never resume a held trigger after USB unplug/suspend/reconnect. Also
++        // discard all filter/debt state so no old movement survives transport loss.
++        if (!Mouse16.mounted() || tud_suspended()) {
++#if ENGINE_DIAGNOSTICS
++            ++diagUnmounted;
++            consecutiveHidBusyTicks = 0;
++#endif
++            requireStartupRelease = true;
++            buttonPhysicallyHeld = false;
++            isRecoilActive = spring.active = warmStateValid = false;
++            inSustainLoop = shootLedSignaled = false;
++            rem_x = rem_y = smooth_x = smooth_y = 0.0f;
++            catchupDebtX = catchupDebtY = catchupCarryX = catchupCarryY = 0.0f;
++            hidBacklog.reset();
++            g_engineLedState.store(ENGINE_LED_IDLE, std::memory_order_relaxed);
++            continue;
+         }
+ 
+         if (debouncedTrigger && !buttonPhysicallyHeld && !requireStartupRelease) {
+@@ -1507,7 +1598,7 @@
+                 rem_x = rem_y = 0.0f;
+                 smooth_x = smooth_y = 0.0f;
+                 drift_x = drift_y = 0.0f;
+-                hidBlockedSinceUs = 0;
++                hidBacklog.reset();
+                 #if (ENGINE_DIAGNOSTICS == 1)
+                 consecutiveHidBusyTicks = 0;
+                 #endif
+@@ -1573,6 +1664,9 @@
+         if (!isRecoilActive && spring.active) {
+             if (!Mouse16.mounted()) {
+                 spring.active = false; // Отключен USB — не копим возврат до переподключения.
++            } else if (recoil::springExpired(nowUs - spring.startUs,
++                                            TAP_SPRINGBACK_TIME_US, HID_BUSY_DROP_US)) {
++                spring.active = false; // check deadline BEFORE attempting any report
+             } else {
+                 const uint64_t passed = nowUs - spring.startUs;
+                 const float u = (float)passed / (float)TAP_SPRINGBACK_TIME_US;
+@@ -1602,7 +1696,7 @@
+                 }
+                 if ((passed >= TAP_SPRINGBACK_TIME_US &&
+                      spring.queuedX == spring.totalX && spring.queuedY == spring.totalY) ||
+-                    passed > (TAP_SPRINGBACK_TIME_US + HID_BUSY_DROP_US)) {
++                    recoil::springExpired(passed, TAP_SPRINGBACK_TIME_US, HID_BUSY_DROP_US)) {
+                     spring.active = false;
+                 }
+             }
+@@ -1707,7 +1801,8 @@
+                                    std::memory_order_relaxed);
+         }
+ 
+-        // Шум, дрейф, фактор усталости и EMA оставлены математически неизменными.
++        // Noise/fatigue parameters are preserved; variable-dt smoothing is
++        // displacement-conserving and matches the original EMA at nominal dt.
+         const float jitterActive = (currentMultY > 0.001f) ? tapEnvelope : 0.0f;
+         const float fatigueFactor = computeMuscleFatigueFactor(idx1, t, inSustainLoop);
+         const float dynamicMicroAmp = JITTER_MICRO_AMP_PX * fatigueFactor;
+@@ -1720,19 +1815,29 @@
+         const float micro_x = randomCenteredFloat() * dynamicMicroAmp * timeDynamics.microScale;
+         const float micro_y = randomCenteredFloat() * dynamicMicroAmp * timeDynamics.microScale;
+ 
++        if (currentMultY <= 0.001f) {
++            // Zero profile means zero new motion, including an old EMA/backlog tail.
++            rem_x = rem_y = smooth_x = smooth_y = 0.0f;
++            catchupDebtX = catchupDebtY = catchupCarryX = catchupCarryY = 0.0f;
++            hidBacklog.reset();
++            continue;
++        }
+         const float raw_x = spline_x + (drift_x + micro_x) * jitterActive;
+         const float raw_y = spline_y + (drift_y + micro_y) * jitterActive;
+-        smooth_x += timeDynamics.emaAlpha * (raw_x - smooth_x);
+-        smooth_y += timeDynamics.emaAlpha * (raw_y - smooth_y);
++        const float dtInTicks = (float)dtUs / (float)BASE_TICK_US;
++        const float increment_x = recoil::filterIncrement(raw_x, dtInTicks,
++            timeDynamics.emaAlpha, EMA_SMOOTH_ALPHA, smooth_x);
++        const float increment_y = recoil::filterIncrement(raw_y, dtInTicks,
++            timeDynamics.emaAlpha, EMA_SMOOTH_ALPHA, smooth_y);
+ 
+         // Субпиксельная арифметика: при сбое очереди HID сохраняем необслуженный
+         // инкремент. При долгой занятости >25 мс сбрасываем его, чтобы не было рывка.
+-        rem_x += smooth_x;
+-        rem_y += smooth_y;
++        rem_x += increment_x;
++        rem_y += increment_y;
+         if (!Mouse16.mounted()) {
+             // Только полное отключение USB стирает старый долг немедленно.
+             rem_x = rem_y = 0.0f;
+-            hidBlockedSinceUs = 0;
++            hidBacklog.reset();
+             #if (ENGINE_DIAGNOSTICS == 1)
+             consecutiveHidBusyTicks = 0;
+             ++diagUnmounted;
+@@ -1747,13 +1852,13 @@
+             #endif
+             // Endpoint занят штатным предыдущим пакетом — сохранить остаток до
+             // следующего тика, не превращая это в потерянное движение.
+-            if (hidBlockedSinceUs == 0) hidBlockedSinceUs = nowUs;
++            const bool backlogExpired = hidBacklog.onBlocked(nowUs);
+             #if (ENGINE_DIAGNOSTICS == 1)
+             trackPending(nowUs, rem_x, rem_y);
+             #endif
+-            if (nowUs - hidBlockedSinceUs > HID_BUSY_DROP_US) {
+-                rem_x = rem_y = 0.0f;
+-                hidBlockedSinceUs = 0;
++            if (backlogExpired) {
++                rem_x = rem_y = smooth_x = smooth_y = 0.0f;
++                catchupDebtX = catchupDebtY = catchupCarryX = catchupCarryY = 0.0f;
+                 #if (ENGINE_DIAGNOSTICS == 1)
+                 ++diagDrops;
+                 #endif
+@@ -1764,6 +1869,30 @@
+         if (consecutiveHidBusyTicks > 0) ++diagReadyAfterBusy; // proxy, not USB completion!
+         consecutiveHidBusyTicks = 0;
+         #endif
++        // Ready may have returned only after a long scheduling/USB pause.
++        // Reject stale history even on the ready path, before rounding or sending.
++        if (hidBacklog.expired(nowUs)) {
++            rem_x = rem_y = smooth_x = smooth_y = 0.0f;
++            catchupDebtX = catchupDebtY = catchupCarryX = catchupCarryY = 0.0f;
++            // Ready is only a hint; a zero-motion probe must actually enter
++            // the queue before a stale/rejected transport is considered recovered.
++            // A failed probe leaves the stale state latched, never re-accumulating.
++            if (Mouse16.sendMove(0, 0)) {
++                hidBacklog.reset();
++#if ENGINE_DIAGNOSTICS
++                ++diagHidQueued;
++#endif
++            } else {
++                (void)hidBacklog.onBlocked(nowUs);
++#if ENGINE_DIAGNOSTICS
++                ++diagHidRejected;
++#endif
++            }
++#if ENGINE_DIAGNOSTICS
++            ++diagDrops;
++#endif
++            continue;
++        }
+         const int send_x = (int)__builtin_lrintf(rem_x);
+         const int send_y = (int)__builtin_lrintf(rem_y);
+         if (send_x != 0 || send_y != 0) {
+@@ -1781,20 +1910,24 @@
+                 #endif
+                 rem_x -= (float)out_x;
+                 rem_y -= (float)out_y;
+-                sentDuringPressX += out_x;
+-                sentDuringPressY += out_y;
+-                hidBlockedSinceUs = 0;
++                // Only a tap can request a return. Bound counters even if the
++                // trigger remains held for days (avoid signed integer overflow).
++                if (nowUs - pressStartTimeUs < TAP_WINDOW_US) {
++                    sentDuringPressX += out_x;
++                    sentDuringPressY += out_y;
++                }
++                hidBacklog.reset();
+             } else {
+                 #if (ENGINE_DIAGNOSTICS == 1)
+                 ++diagHidRejected;
+                 #endif
+-                if (hidBlockedSinceUs == 0) hidBlockedSinceUs = nowUs;
++                const bool backlogExpired = hidBacklog.onBlocked(nowUs);
+                 #if (ENGINE_DIAGNOSTICS == 1)
+                 trackPending(nowUs, rem_x, rem_y);
+                 #endif
+-                if (nowUs - hidBlockedSinceUs > HID_BUSY_DROP_US) {
+-                    rem_x = rem_y = 0.0f;
+-                    hidBlockedSinceUs = 0;
++                if (backlogExpired) {
++                    rem_x = rem_y = smooth_x = smooth_y = 0.0f;
++                    catchupDebtX = catchupDebtY = catchupCarryX = catchupCarryY = 0.0f;
+                     #if (ENGINE_DIAGNOSTICS == 1)
+                     ++diagDrops;
+                     #endif
+@@ -1812,50 +1945,25 @@
+     up.init(digitalRead(BTN_PROF_UP_PIN) == LOW, now);
+     down.init(digitalRead(BTN_PROF_DOWN_PIN) == LOW, now);
+ 
+-    unsigned long fnPressStartTime = 0;
+-    unsigned long fnLastReleaseTime = 0;
+-    uint8_t fnClickCount = 0;
+-    bool fnLongPressTriggered = false;
+-    bool fnTrackingPress = false;
++    recoil::FnGesture fnGesture(FN_HOLD_MS, FN_MIN_CLICK_MS, FN_DOUBLE_WINDOW_MS);
+ 
+     for (;;) {
+         now = millis();
+         updateBlinker(now);
+-
+         const uint8_t fnEdge = fn.update(digitalRead(FN_BUTTON_PIN) == LOW, now);
+-        if (fnEdge & 1u) {
+-            fnTrackingPress = true;
+-            fnPressStartTime = now;
+-            fnLongPressTriggered = false;
+-        }
+-        if (fnTrackingPress && fn.pressed && !fnLongPressTriggered &&
+-            (unsigned long)(now - fnPressStartTime) >= FN_HOLD_MS) {
+-            fnLongPressTriggered = true;
+-            fnClickCount = 0;  // a long hold cannot complete a double FN
++        const auto event = fnGesture.update(fnEdge & 1u, fnEdge & 2u, fn.pressed, now);
++        if (event == recoil::FnGesture::LONG_HOLD) {
+             const CombatMode newMode = (readControl().mode == MODE_CLOSE) ? MODE_LONG : MODE_CLOSE;
+             setControlMode(newMode);
+             needSaveMode = true;
+             saveSettingsTime = now + 2000UL;
+             if (newMode == MODE_CLOSE) startBlink(0, 20, 80, 3);
+             else startBlink(80, 0, 80, 3);
+-        }
+-        if (fnEdge & 2u) {
+-            if (fnTrackingPress && !fnLongPressTriggered &&
+-                (unsigned long)(now - fnPressStartTime) > FN_MIN_CLICK_MS) {
+-                // The first click starts a window; a second one completes it.
+-                if (fnClickCount < 2u) ++fnClickCount;
+-                fnLastReleaseTime = now;
+-            }
+-            fnTrackingPress = false;
+-        }
+-        if (fnClickCount && (unsigned long)(now - fnLastReleaseTime) > FN_DOUBLE_WINDOW_MS) {
+-            if (fnClickCount >= 2u) {
+-                const bool enabled = !readControl().enabled;
+-                setControlEnabled(enabled);
+-                if (enabled) startBlink(0, 60, 0, 2);
+-                else startBlink(60, 0, 0, 2);
+-            }
+-            fnClickCount = 0;
++        } else if (event == recoil::FnGesture::DOUBLE_CLICK) {
++            const bool enabled = !readControl().enabled;
++            setControlEnabled(enabled);
++            if (enabled) startBlink(0, 60, 0, 2);
++            else startBlink(60, 0, 0, 2);
+         }
+ 
+         const uint8_t upEdge = up.update(digitalRead(BTN_PROF_UP_PIN) == LOW, now);
+@@ -1881,8 +1989,15 @@
+ 
+         const bool physicallyShooting = gpio_get_level((gpio_num_t)TRIGGER_PIN) == 0;
+         if ((needSaveProfile || needSaveMode) &&
+-            (int32_t)(now - saveSettingsTime) > 0 && !physicallyShooting) {
++            (int32_t)(now - saveSettingsTime) >= 0 && !physicallyShooting &&
++            !g_engineFault.load(std::memory_order_acquire)) {
++            g_flashSaveRequested.store(true, std::memory_order_release);
++        }
++        if (g_flashSaveGranted.load(std::memory_order_acquire) &&
++            g_flashSaveRequested.load(std::memory_order_acquire)) {
+             saveConfigSafely();
++            saveSettingsTime = millis() + 2000UL;
++            g_flashSaveRequested.store(false, std::memory_order_release);
+         }
+ 
+         // Compute one authoritative LED color after updating all button states.
+@@ -1921,6 +2036,15 @@
+     }
+ }
+ 
++[[noreturn]] void failStartup() {
++    setControlEnabled(false);
++    g_engineFault.store(true, std::memory_order_release);
++    for (;;) {
++        writeLedIfChanged(80, 0, 0); delay(150);
++        writeLedIfChanged(0, 0, 0); delay(150);
++    }
++}
++
+ void setup() {
+     #if (ENGINE_DIAG_UART == 1)
+     Serial0.begin(115200);
+@@ -1945,12 +2069,13 @@
+ 
+     r32InitDynamics();
+     Mouse16.begin();
+-    USB.begin();
+-
+-    prefs.begin("recoil_cfg", false);
+-    int initProf = constrain(prefs.getInt("prof_idx", 14), 0, 14);
+-
+-    int rawMode = prefs.getInt("mode_idx", MODE_CLOSE);
++    if (!USB.begin()) failStartup();
++
++    settingsStoreReady = prefs.begin("recoil_cfg", false);
++    settingsSaveFailed = !settingsStoreReady;
++    int initProf = settingsStoreReady ? constrain(prefs.getInt("prof_idx", 14), 0, 14) : 14;
++
++    int rawMode = settingsStoreReady ? prefs.getInt("mode_idx", MODE_CLOSE) : MODE_CLOSE;
+     CombatMode initMode = (rawMode == MODE_LONG) ? MODE_LONG : MODE_CLOSE;
+ 
+     // Одна атомарная публикация согласованной стартовой конфигурации.
+@@ -1958,18 +2083,19 @@
+ 
+     setProfileColor(initProf);
+ 
+-    // Сохранена исходная Core 1 busy-wait архитектура.
+-    // WDT по Idle 1 снят намеренно, иначе без yield возможны ложные перезапуски.
+-    // Это компромисс, а не доказательство стабильности таймингов.
+-    TaskHandle_t idle_1 = xTaskGetIdleTaskHandleForCPU(1);
+-    if (idle_1 != NULL) {
+-        esp_task_wdt_delete(idle_1);
++    // Timer-notification wait keeps Core 1 schedulable. Do not disable Idle WDT.
++    esp_timer_create_args_t timerArgs = {};
++    timerArgs.callback = engineWakeCallback;
++    timerArgs.dispatch_method = ESP_TIMER_TASK;
++    timerArgs.name = "engine-wake";
++    if (esp_timer_create(&timerArgs, &engineWakeTimer) != ESP_OK) {
++        failStartup();
+     }
+ 
+     // Create Engine first: it waits on g_tasksReady and cannot emit HID reports
+     // until BOTH tasks were successfully created. Failure is visible on the LED.
+     const BaseType_t engineCreated = xTaskCreatePinnedToCore(
+-        EngineTask, "EngineTask", 4096, NULL, configMAX_PRIORITIES - 1, &engineTaskHandle, 1);
++        EngineTask, "EngineTask", 4096, NULL, 4, &engineTaskHandle, 1);
+     BaseType_t controlCreated = pdFAIL;
+     if (engineCreated == pdPASS && engineTaskHandle != NULL) {
+         controlCreated = xTaskCreatePinnedToCore(
+@@ -1978,13 +2104,7 @@
+     if (engineCreated != pdPASS || engineTaskHandle == NULL ||
+         controlCreated != pdPASS || controlTaskHandle == NULL) {
+         // An error must not leave a working-looking HID engine with no buttons.
+-        setControlEnabled(false);
+-        for (;;) {
+-            writeLedIfChanged(80, 0, 0);
+-            delay(150);
+-            writeLedIfChanged(0, 0, 0);
+-            delay(150);
+-        }
++        failStartup();
+     }
+     g_tasksReady.store(true, std::memory_order_release);
+ }
