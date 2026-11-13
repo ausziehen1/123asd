@@ -144,8 +144,8 @@ int main(int argc, char** argv) {
         server.Get("/", safe([&](const auto& req, auto& res) {
             auto platform = req.has_param("platform_type_id") ? number(req.get_param_value("platform_type_id")) : 0;
             auto after = req.has_param("after") ? number(req.get_param_value("after")) : 0;
-            std::string html = "<h1>Карточки оборудования</h1><p class='note'>Этап 1: регистрация и просмотр. "
-                               "Редактор, приложения и печать QR будут добавлены следующими этапами.</p>"
+            std::string html = "<h1>Карточки оборудования</h1><p class='note'>Регистрация партий доступна в приложении Креатор. "
+                               "Редактор бланка, Ридер и печать QR будут добавлены следующими этапами.</p>"
                                "<form method='get'><label>Тип платформы: <select name='platform_type_id'>"
                                "<option value='0'>Все типы</option>";
             for (const auto& p : store.platforms()) {
@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
                         "</td><td><a href='/cards/" + id + "'>Открыть</a></td></tr>";
             }
             html += "</table></div>";
-            if (rows.empty()) html += "<p>Записей пока нет. Для первой регистрации запустите 03_demo.cmd.</p>";
+            if (rows.empty()) html += "<p>Записей пока нет. Для регистрации партии запустите repair_creator.</p>";
             if (rows.size() == 100) html += "<p><a href='/?platform_type_id=" + std::to_string(platform) +
                 "&amp;after=" + std::to_string(rows.back().at("id").template get<long long>()) + "'>Следующие записи</a></p>";
             res.set_content(page("Карточки оборудования", html), "text/html; charset=utf-8");

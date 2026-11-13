@@ -1,13 +1,22 @@
-# Карточки ремонта: первый этап
+# Карточки ремонта: загрузка проекта
 
-[Скачать полный ZIP](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage1.zip)
+## Текущий этап 2.1 — оконный Креатор
 
-Архив включает исходники на C++, SQLite, cpp-httplib, JSON-библиотеку, Excel-шаблон и инструкции для CLion / MinGW64. Отдельно загружать библиотеки не требуется.
+[Скачать полный ZIP](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-creator.zip)
 
-Исходники: [repair-cards-stage1](repair-cards-stage1). Инструкция: [CLION.md](repair-cards-stage1/docs/CLION.md).
+[Обновление существующего проекта и запуск Креатора](repair-cards-stage1/docs/CREATOR.md).
 
-Это этап регистрации карточек и работы SQLite / сервера. Оконные Креатор и Ридер, редактор таблицы и печать Zebra еще не реализованы.
+В архиве исходники на C++, все библиотеки и Excel-шаблон. Новая цель CLion — `repair_creator`.
+Креатор подключается к серверу, показывает типы платформ и карточки, предлагает следующий ID, позволяет добавить тип и зарегистрировать партию с проверкой диапазона и подтверждением.
 
-Сборка и проверки выполнены в Linux; сборку MinGW64 на Windows 10 предстоит проверить.
+Существующая база остается в папке `data` проекта. Перед обновлением остановите сервер и сделайте копию этой папки. Полная инструкция приведена по ссылке выше.
 
-ZIP содержит 27 файлов. SHA-256: `45f6fa420140d0258ef8a66f8a010ad633c5a9d14c1f037286ee7accdc80bb38`.
+Сборка Windows EXE через LLVM-MinGW и две группы тестов прошли. Запуск окна на Windows предстоит проверить. Свободный редактор, Ридер, QR и печать будут следующими шагами.
+
+Архив содержит 32 файла. SHA-256: `551f5e0ce48af6f3c3dc9f4e7cfc32114565dc0ab89e494f946a685d98f9088e`.
+
+## Предыдущий этап 1
+
+[Скачать предыдущий ZIP](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage1.zip).
+
+[Исходники текущего этапа](repair-cards-stage1).
