@@ -1,0 +1,199 @@
+#include "httplib.h"
+#include "store.h"
+#include "sequence.h"
+#include <charconv>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <sstream>
+
+namespace fs = std::filesystem;
+
+std::string read_file(const fs::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot read file: " + path.u8string());
+    std::ostringstream out; out << f.rdbuf();
+    if (f.bad()) throw std::runtime_error("File read failed: " + path.u8string());
+    return out.str();
+}
+long long number(const std::string& s) {
+    long long value = 0;
+    auto result = std::from_chars(s.data(), s.data() + s.size(), value);
+    if (s.empty() || result.ec != std::errc{} || result.ptr != s.data() + s.size() || value < 0)
+        throw InputError("Expected a non-negative integer");
+    return value;
+}
+long long integer_field(const json& body, const char* key) {
+    const auto& value = body.at(key);
+    if (!value.is_number_integer() ||
+        (value.is_number_unsigned() && value.get<unsigned long long>() >
+            static_cast<unsigned long long>(std::numeric_limits<long long>::max())))
+        throw InputError(std::string(key) + " must be an integer");
+    return value.get<long long>();
+}
+int batch_count(const json& body) {
+    auto count = integer_field(body, "count");
+    if (count < 1 || count > 1000) throw InputError("Count must be between 1 and 1000");
+    return static_cast<int>(count);
+}
+std::string escape(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&#39;"; break;
+        default: out += c;
+        }
+    }
+    return out;
+}
+std::string page(const std::string& title, const std::string& body) {
+    return "<!doctype html><html lang='ru'><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'><title>" + escape(title) +
+        "</title><style>body{font:16px Arial,sans-serif;margin:24px;color:#18202a;background:#f5f6f8}"
+        "main{max-width:1200px;margin:auto;background:white;padding:24px;border-radius:12px}"
+        "table{border-collapse:collapse;width:100%;margin-top:20px}th,td{border:1px solid #aaa;padding:10px;text-align:left}"
+        "th{background:#eee}a{color:#145a9c}select,button{font:inherit;padding:8px}.scroll{overflow:auto}"
+        ".note{color:#59616d;line-height:1.5}.blank{min-width:900px}.blank td{height:50px;vertical-align:top}"
+        ".heading{background:#ddd;text-align:center;font-weight:bold;padding:12px}"
+        ".fields{display:grid;grid-template-columns:2fr 1fr;gap:24px;padding:24px 8px}"
+        "@media(max-width:600px){body{margin:8px}main{padding:12px}}</style><main>" + body + "</main></html>";
+}
+void send(httplib::Response& response, const json& body, int status = 200) {
+    response.status = status;
+    response.set_content(body.dump(), "application/json; charset=utf-8");
+}
+template<class Function>
+auto safe(Function function) {
+    return [function](const httplib::Request& request, httplib::Response& response) {
+        try { function(request, response); }
+        catch (const InputError& e) { send(response, {{"error", e.what()}}, 400); }
+        catch (const NotFound& e) { send(response, {{"error", e.what()}}, 404); }
+        catch (const json::exception&) { send(response, {{"error", "Invalid JSON body or field types"}}, 400); }
+        catch (const std::exception& e) {
+            std::cerr << "Request failed: " << e.what() << '\n';
+            send(response, {{"error", "Internal server error; see server console"}}, 500);
+        }
+    };
+}
+
+int main(int argc, char** argv) {
+    try {
+        fs::path config_path = fs::u8path("config.example.json");
+        if (argc == 3 && std::string(argv[1]) == "--config") config_path = fs::u8path(argv[2]);
+        else if (argc != 1) throw InputError("Usage: repair_server [--config path.json]");
+        config_path = fs::absolute(config_path);
+        auto config = json::parse(read_file(config_path));
+        auto host = config.at("host").get<std::string>();
+        auto port_value = integer_field(config, "port");
+        if (port_value < 1 || port_value > 65535) throw InputError("Port must be between 1 and 65535");
+        int port = static_cast<int>(port_value);
+        auto database = config_path.parent_path() / fs::u8path(config.at("database").get<std::string>());
+        auto template_path = config_path.parent_path() / fs::u8path(config.at("template").get<std::string>());
+        auto workbook = read_file(template_path);
+        if (workbook.size() < 4 || workbook.substr(0, 4) != std::string("PK\x03\x04", 4))
+            throw InputError("Template must be an XLSX ZIP file");
+        if (workbook.size() > 10 * 1024 * 1024) throw InputError("Template exceeds 10 MiB");
+        fs::create_directories(database.parent_path());
+        Store store(database.u8string());
+        httplib::Server server;
+        server.new_task_queue = [] { return new httplib::ThreadPool(4); };
+        server.set_payload_max_length(64 * 1024);
+        server.set_read_timeout(10, 0);
+        server.set_write_timeout(10, 0);
+        server.set_default_headers({{"Cache-Control", "no-store"}, {"X-Content-Type-Options", "nosniff"},
+                                   {"Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
+        server.Get("/api/health", safe([&](const auto&, auto& res) {
+            send(res, {{"status", "ok"}, {"version", "0.1.0"}, {"sqlite", sqlite3_libversion()}});
+        }));
+        server.Get("/api/platforms", safe([&](const auto&, auto& res) { send(res, store.platforms()); }));
+        server.Post("/api/platforms", safe([&](const auto& req, auto& res) {
+            auto body = json::parse(req.body);
+            send(res, store.create_platform(body.at("name").template get<std::string>()), 201);
+        }));
+        server.Post("/api/batches/preview", safe([&](const auto& req, auto& res) {
+            auto body = json::parse(req.body);
+            auto ids = make_sequence(body.at("first_product_id").template get<std::string>(), batch_count(body));
+            send(res, {{"count", ids.size()}, {"first_product_id", ids.front()},
+                       {"last_product_id", ids.back()}, {"next_product_id", next_product_id(ids.back())}});
+        }));
+        server.Post("/api/batches", safe([&](const auto& req, auto& res) {
+            auto body = json::parse(req.body);
+            send(res, store.create_batch(integer_field(body, "platform_type_id"),
+                 body.at("first_product_id").template get<std::string>(), batch_count(body), workbook), 201);
+        }));
+        server.Get("/api/cards", safe([&](const auto& req, auto& res) {
+            auto platform = req.has_param("platform_type_id") ? number(req.get_param_value("platform_type_id")) : 0;
+            auto after = req.has_param("after") ? number(req.get_param_value("after")) : 0;
+            auto limit = req.has_param("limit") ? number(req.get_param_value("limit")) : 100;
+            if (limit < 1 || limit > 1000) throw InputError("Limit must be between 1 and 1000");
+            send(res, store.cards(platform, static_cast<int>(limit), after));
+        }));
+        server.Get(R"(/api/cards/([0-9]+))", safe([&](const auto& req, auto& res) {
+            send(res, store.card(number(req.matches[1].str())));
+        }));
+        server.Get(R"(/api/cards/([0-9]+)/workbook)", safe([&](const auto& req, auto& res) {
+            auto id = number(req.matches[1].str());
+            res.set_header("Content-Disposition", "attachment; filename=card-" + std::to_string(id) + ".xlsx");
+            res.set_content(store.workbook(id), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        }));
+        server.Get("/", safe([&](const auto& req, auto& res) {
+            auto platform = req.has_param("platform_type_id") ? number(req.get_param_value("platform_type_id")) : 0;
+            auto after = req.has_param("after") ? number(req.get_param_value("after")) : 0;
+            std::string html = "<h1>Карточки оборудования</h1><p class='note'>Этап 1: регистрация и просмотр. "
+                               "Редактор, приложения и печать QR будут добавлены следующими этапами.</p>"
+                               "<form method='get'><label>Тип платформы: <select name='platform_type_id'>"
+                               "<option value='0'>Все типы</option>";
+            for (const auto& p : store.platforms()) {
+                auto id = p.at("id").template get<long long>();
+                html += "<option value='" + std::to_string(id) + "'" + (id == platform ? " selected" : "") + ">" +
+                        escape(p.at("name").template get<std::string>()) + "</option>";
+            }
+            html += "</select></label> <button>Показать</button></form><div class='scroll'><table>"
+                    "<tr><th>Внутренний ID</th><th>ID продукции</th><th>Тип платформы</th><th>Бланк</th></tr>";
+            auto rows = store.cards(platform, 100, after);
+            for (const auto& c : rows) {
+                auto id = std::to_string(c.at("id").template get<long long>());
+                html += "<tr><td>" + id + "</td><td>" + escape(c.at("product_id").template get<std::string>()) +
+                        "</td><td>" + escape(c.at("platform_name").template get<std::string>()) +
+                        "</td><td><a href='/cards/" + id + "'>Открыть</a></td></tr>";
+            }
+            html += "</table></div>";
+            if (rows.empty()) html += "<p>Записей пока нет. Для первой регистрации запустите 03_demo.cmd.</p>";
+            if (rows.size() == 100) html += "<p><a href='/?platform_type_id=" + std::to_string(platform) +
+                "&amp;after=" + std::to_string(rows.back().at("id").template get<long long>()) + "'>Следующие записи</a></p>";
+            res.set_content(page("Карточки оборудования", html), "text/html; charset=utf-8");
+        }));
+        server.Get(R"(/cards/([0-9]+))", safe([&](const auto& req, auto& res) {
+            auto c = store.card(number(req.matches[1].str()));
+            auto id = std::to_string(c.at("id").template get<long long>());
+            std::string html = "<p><a href='/'>← К списку</a></p><p class='note'>Предварительный просмотр. "
+                "Внутренний ID: " + id + ". Тип платформы: " + escape(c.at("platform_name").template get<std::string>()) +
+                ". Редактирование появится на следующем этапе.</p><div class='scroll'><section class='blank'>"
+                "<div class='heading'>Карточка некондиционного товара</div><div class='fields'><div><strong>#ID " +
+                escape(c.at("product_id").template get<std::string>()) + "</strong></div><div>Заказ: __________________</div>"
+                "<div>Наименование товара: __________________<br><small>Модель / Part.No</small></div>"
+                "<div>Код 1С: __________________</div></div><div class='heading'>Информация о внесении изменений в карточку</div>"
+                "<table style='margin-top:0'><tr><th>№</th><th>Дата</th><th>№ Акта</th><th>Наименование узла</th>"
+                "<th>Описание неисправности/дефекта</th><th>Ответственный, ФИО</th></tr>";
+            for (int i = 1; i <= 8; ++i) html += "<tr><td>" + std::to_string(i) + "</td><td></td><td></td><td></td><td></td><td></td></tr>";
+            html += "</table></section></div><p class='note'>В SQLite сохранена отдельная копия исходного XLSX-шаблона. "
+                    "Этот предварительный просмотр показывает учетный ID из базы; сам XLSX пока не заполняется.</p>";
+            res.set_content(page("Карточка " + c.at("product_id").template get<std::string>(), html), "text/html; charset=utf-8");
+        }));
+        server.set_error_handler([](const auto&, auto& res) {
+            if (res.body.empty()) send(res, {{"error", "Route not found"}}, res.status);
+        });
+        std::cout << "Repair Cards 0.1.0\nDatabase: " << database.u8string()
+                  << "\nListen: http://" << host << ':' << port << "\nStop: Ctrl+C\n" << std::flush;
+        if (!server.listen(host, port)) throw std::runtime_error("Cannot listen on configured host/port");
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Startup failed: " << e.what() << '\n';
+        return 1;
+    }
+}
