@@ -1,6 +1,7 @@
 #include "httplib.h"
 #include "store.h"
 #include "sequence.h"
+#include "document.h"
 #include <charconv>
 #include <filesystem>
 #include <fstream>
@@ -72,6 +73,7 @@ auto safe(Function function) {
     return [function](const httplib::Request& request, httplib::Response& response) {
         try { function(request, response); }
         catch (const InputError& e) { send(response, {{"error", e.what()}}, 400); }
+        catch (const RevisionConflict& e) { send(response, {{"error", e.what()}}, 409); }
         catch (const NotFound& e) { send(response, {{"error", e.what()}}, 404); }
         catch (const json::exception&) { send(response, {{"error", "Invalid JSON body or field types"}}, 400); }
         catch (const std::exception& e) {
@@ -94,6 +96,10 @@ int main(int argc, char** argv) {
         int port = static_cast<int>(port_value);
         auto database = config_path.parent_path() / fs::u8path(config.at("database").get<std::string>());
         auto template_path = config_path.parent_path() / fs::u8path(config.at("template").get<std::string>());
+        auto web_root = config_path.parent_path() / fs::u8path(config.value("web", "web"));
+        if (!config.contains("web") && !fs::exists(web_root / "document.html"))
+            web_root = fs::absolute(fs::u8path(argv[0])).parent_path() / "web";
+        auto document_page = read_file(web_root / "document.html");
         auto workbook = read_file(template_path);
         if (workbook.size() < 4 || workbook.substr(0, 4) != std::string("PK\x03\x04", 4))
             throw InputError("Template must be an XLSX ZIP file");
@@ -102,13 +108,22 @@ int main(int argc, char** argv) {
         Store store(database.u8string());
         httplib::Server server;
         server.new_task_queue = [] { return new httplib::ThreadPool(4); };
-        server.set_payload_max_length(64 * 1024);
+        server.set_payload_max_length(26 * 1024 * 1024);
         server.set_read_timeout(10, 0);
         server.set_write_timeout(10, 0);
         server.set_default_headers({{"Cache-Control", "no-store"}, {"X-Content-Type-Options", "nosniff"},
-                                   {"Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
+                                   {"Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
+        server.Get(R"(/assets/([a-zA-Z0-9_.-]+))", safe([&](const auto& req, auto& res) {
+            auto name = req.matches[1].str();
+            if (name != "xspreadsheet.js" && name != "xspreadsheet.css" && name != "exceljs.min.js" &&
+                name != "locale-ru.js" && name != "editor.js" && name != "editor.css" &&
+                name != "58eaeb4e52248a5c75936c6f4c33a370.svg") throw NotFound("Asset not found");
+            auto type = name.size() >= 4 && name.substr(name.size()-4) == ".css" ? "text/css; charset=utf-8" :
+                (name.size() >= 4 && name.substr(name.size()-4) == ".svg" ? "image/svg+xml" : "application/javascript; charset=utf-8");
+            res.set_content(read_file(web_root / "assets" / name), type);
+        }));
         server.Get("/api/health", safe([&](const auto&, auto& res) {
-            send(res, {{"status", "ok"}, {"version", "0.1.0"}, {"sqlite", sqlite3_libversion()}});
+            send(res, {{"status", "ok"}, {"version", "0.3.0"}, {"sqlite", sqlite3_libversion()}});
         }));
         server.Get("/api/platforms", safe([&](const auto&, auto& res) { send(res, store.platforms()); }));
         server.Post("/api/platforms", safe([&](const auto& req, auto& res) {
@@ -141,11 +156,19 @@ int main(int argc, char** argv) {
             res.set_header("Content-Disposition", "attachment; filename=card-" + std::to_string(id) + ".xlsx");
             res.set_content(store.workbook(id), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         }));
+        server.Get(R"(/api/cards/([0-9]+)/document)", safe([&](const auto& req, auto& res) {
+            send(res, store.document(number(req.matches[1].str())));
+        }));
+        server.Put(R"(/api/cards/([0-9]+)/document)", safe([&](const auto& req, auto& res) {
+            auto body = json::parse(req.body);
+            auto bytes = decode_workbook(body.at("workbook_base64").template get<std::string>());
+            send(res, store.save_document(number(req.matches[1].str()), integer_field(body, "revision"), body.at("document"), bytes));
+        }));
         server.Get("/", safe([&](const auto& req, auto& res) {
             auto platform = req.has_param("platform_type_id") ? number(req.get_param_value("platform_type_id")) : 0;
             auto after = req.has_param("after") ? number(req.get_param_value("after")) : 0;
-            std::string html = "<h1>Карточки оборудования</h1><p class='note'>Регистрация партий доступна в приложении Креатор. "
-                               "Редактор бланка, Ридер и печать QR будут добавлены следующими этапами.</p>"
+            std::string html = "<h1>Карточки оборудования</h1><p class='note'>Регистрация партий и открытие редактора доступны в приложении Креатор. "
+                               "Ссылки ниже открывают бланки для просмотра.</p>"
                                "<form method='get'><label>Тип платформы: <select name='platform_type_id'>"
                                "<option value='0'>Все типы</option>";
             for (const auto& p : store.platforms()) {
@@ -168,27 +191,25 @@ int main(int argc, char** argv) {
                 "&amp;after=" + std::to_string(rows.back().at("id").template get<long long>()) + "'>Следующие записи</a></p>";
             res.set_content(page("Карточки оборудования", html), "text/html; charset=utf-8");
         }));
-        server.Get(R"(/cards/([0-9]+))", safe([&](const auto& req, auto& res) {
-            auto c = store.card(number(req.matches[1].str()));
-            auto id = std::to_string(c.at("id").template get<long long>());
-            std::string html = "<p><a href='/'>← К списку</a></p><p class='note'>Предварительный просмотр. "
-                "Внутренний ID: " + id + ". Тип платформы: " + escape(c.at("platform_name").template get<std::string>()) +
-                ". Редактирование появится на следующем этапе.</p><div class='scroll'><section class='blank'>"
-                "<div class='heading'>Карточка некондиционного товара</div><div class='fields'><div><strong>#ID " +
-                escape(c.at("product_id").template get<std::string>()) + "</strong></div><div>Заказ: __________________</div>"
-                "<div>Наименование товара: __________________<br><small>Модель / Part.No</small></div>"
-                "<div>Код 1С: __________________</div></div><div class='heading'>Информация о внесении изменений в карточку</div>"
-                "<table style='margin-top:0'><tr><th>№</th><th>Дата</th><th>№ Акта</th><th>Наименование узла</th>"
-                "<th>Описание неисправности/дефекта</th><th>Ответственный, ФИО</th></tr>";
-            for (int i = 1; i <= 8; ++i) html += "<tr><td>" + std::to_string(i) + "</td><td></td><td></td><td></td><td></td><td></td></tr>";
-            html += "</table></section></div><p class='note'>В SQLite сохранена отдельная копия исходного XLSX-шаблона. "
-                    "Этот предварительный просмотр показывает учетный ID из базы; сам XLSX пока не заполняется.</p>";
-            res.set_content(page("Карточка " + c.at("product_id").template get<std::string>(), html), "text/html; charset=utf-8");
-        }));
+        auto show_document = [&](bool editable, const httplib::Request& req, httplib::Response& res) {
+            auto id = number(req.matches[1].str());
+            store.card(id);
+            auto html = document_page;
+            auto replace = [&](const std::string& from, const std::string& to) {
+                size_t pos = 0;
+                while ((pos = html.find(from, pos)) != std::string::npos) { html.replace(pos, from.size(), to); pos += to.size(); }
+            };
+            replace("{{CARD_ID}}", std::to_string(id));
+            replace("{{MODE}}", editable ? "edit" : "read");
+            replace("{{MODE_CLASS}}", editable ? "editor" : "reader");
+            res.set_content(html, "text/html; charset=utf-8");
+        };
+        server.Get(R"(/cards/([0-9]+))", safe([&](const auto& req, auto& res) { show_document(false, req, res); }));
+        server.Get(R"(/edit/([0-9]+))", safe([&](const auto& req, auto& res) { show_document(true, req, res); }));
         server.set_error_handler([](const auto&, auto& res) {
             if (res.body.empty()) send(res, {{"error", "Route not found"}}, res.status);
         });
-        std::cout << "Repair Cards 0.1.0\nDatabase: " << database.u8string()
+        std::cout << "Repair Cards 0.3.0\nDatabase: " << database.u8string()
                   << "\nListen: http://" << host << ':' << port << "\nStop: Ctrl+C\n" << std::flush;
         if (!server.listen(host, port)) throw std::runtime_error("Cannot listen on configured host/port");
         return 0;

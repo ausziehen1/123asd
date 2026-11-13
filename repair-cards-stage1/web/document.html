@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Карточка оборудования</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/xspreadsheet.css">
+  <link rel="stylesheet" href="/assets/editor.css">
+  <script src="/assets/xspreadsheet.js" defer></script>
+  <script src="/assets/locale-ru.js" defer></script>
+  <script src="/assets/exceljs.min.js" defer></script>
+  <script src="/assets/editor.js" defer></script>
+</head>
+<body class="{{MODE_CLASS}}" data-card-id="{{CARD_ID}}" data-mode="{{MODE}}">
+  <header><a href="/">← К списку</a><h1 id="title">Карточка оборудования</h1><span id="identity" class="meta"></span></header>
+  <div class="actions">
+    <button id="save" class="edit-only" disabled>Сохранить</button>
+    <button id="insert-row" class="edit-only">Вставить строку</button>
+    <button id="insert-column" class="edit-only">Вставить столбец</button>
+    <button id="reload">Открыть сохраненную версию</button>
+    <label>Лист: <select id="sheet-select" aria-label="Лист"></select></label>
+  </div>
+  <div id="state" role="status" aria-live="polite">Загружаем бланк…</div>
+  <div id="spreadsheet"></div>
+  <div class="hint edit-only">Двойной щелчок по ячейке — ввод. Правая кнопка — операции со строками и столбцами. Ctrl+S — сохранить.</div>
+  <noscript>Для открытия бланка включите JavaScript в браузере.</noscript>
+</body>
+</html>

@@ -74,7 +74,9 @@ with tempfile.TemporaryDirectory(prefix='repair-api-') as directory:
         original = (ROOT / 'templates/blank.xlsx').read_bytes()
         assert call('/api/cards/1/workbook', raw=True) == original
         html = call('/cards/1', raw=True).decode()
-        assert 'V00001' in html and '&lt;script&gt;' in html and '<script>' not in html
+        assert 'data-card-id="1"' in html and 'data-mode="read"' in html
+        index_html = call('/', raw=True).decode()
+        assert '&lt;script&gt;' in index_html and '<script>alert(1)</script>' not in index_html
         assert 'contenteditable' not in html
         for value in [0, -1, 1001, 1.5, True, '5', 2**64 - 1]:
             call('/api/batches', {**body, 'count': value}, 400)

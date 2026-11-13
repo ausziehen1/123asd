@@ -1,6 +1,7 @@
 # Первый запуск в CLion с MinGW64
 
 Если первый этап уже проверен, инструкция обновления и запуска отдельного Креатора: **[CREATOR.md](CREATOR.md)**.
+Если Креатор уже работает, обновление для редактора бланка: **[EDITOR.md](EDITOR.md)**.
 
 Visual Studio и MSVC для этого проекта не нужны. Используем установленный MinGW64.
 
@@ -59,7 +60,7 @@ Visual Studio и MSVC для этого проекта не нужны. Испо
 Ожидаемые строки в консоли:
 
 ```text
-Repair Cards 0.1.0
+Repair Cards 0.3.0
 Database: .../data/repair.sqlite3
 Listen: http://127.0.0.1:8080
 Stop: Ctrl+C

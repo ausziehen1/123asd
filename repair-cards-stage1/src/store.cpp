@@ -1,5 +1,7 @@
 #include "store.h"
 #include "sequence.h"
+#include "document.h"
+#include <limits>
 #include <memory>
 
 namespace {
@@ -60,10 +62,9 @@ Store::Store(const std::string& filename) {
     try {
         sqlite3_busy_timeout(db_, 5000);
         exec(db_, "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
-        Statement version(db_, "PRAGMA user_version");
-        version.step();
-        const auto v = version.int_at(0);
-        if (v > 1) throw std::runtime_error("Database belongs to a newer application version");
+        long long v = 0;
+        { Statement version(db_, "PRAGMA user_version"); version.step(); v = version.int_at(0); }
+        if (v > 2) throw std::runtime_error("Database belongs to a newer application version");
         if (v == 0) {
             exec(db_,
                 "BEGIN IMMEDIATE;"
@@ -78,6 +79,13 @@ Store::Store(const std::string& filename) {
                 "CREATE INDEX cards_platform_id ON cards(platform_type_id,id);"
                 "CREATE INDEX cards_product_id ON cards(product_id);"
                 "PRAGMA user_version=1; COMMIT;");
+        }
+        if (v < 2) {
+            exec(db_, "BEGIN IMMEDIATE;"
+                "ALTER TABLE cards ADD COLUMN document_json TEXT;"
+                "ALTER TABLE cards ADD COLUMN document_revision INTEGER NOT NULL DEFAULT 0;"
+                "ALTER TABLE cards ADD COLUMN document_updated_at TEXT;"
+                "PRAGMA user_version=2; COMMIT;");
         }
     } catch (...) { sqlite3_close(db_); db_ = nullptr; throw; }
 }
@@ -155,4 +163,41 @@ std::string Store::workbook(long long id) {
     auto p = static_cast<const char*>(sqlite3_column_blob(q.value, 0));
     int n = sqlite3_column_bytes(q.value, 0);
     return p && n ? std::string(p, n) : std::string();
+}
+json Store::document(long long id) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    Statement q(db_, "SELECT document_json,document_revision,document_updated_at FROM cards WHERE id=?");
+    q.integer(1, id);
+    if (!q.step()) throw NotFound("Card not found");
+    auto raw = q.text_at(0), updated = q.text_at(2);
+    return {{"revision", q.int_at(1)}, {"document", raw.empty() ? json(nullptr) : json::parse(raw)},
+            {"updated_at", updated.empty() ? json(nullptr) : json(updated)}};
+}
+json Store::save_document(long long id, long long expected_revision, const json& document,
+                          const std::string& workbook) {
+    if (expected_revision < 0 || expected_revision == std::numeric_limits<long long>::max())
+        throw InputError("Invalid document revision");
+    validate_document(document);
+    if (workbook.size() < 4 || workbook.size() > 10 * 1024 * 1024 || workbook.substr(0, 4) != std::string("PK\x03\x04", 4))
+        throw InputError("Workbook must be an XLSX ZIP file");
+    auto raw = document.dump();
+    std::lock_guard<std::mutex> guard(mutex_);
+    exec(db_, "BEGIN IMMEDIATE");
+    try {
+        Statement exists(db_, "SELECT document_revision FROM cards WHERE id=?");
+        exists.integer(1, id);
+        if (!exists.step()) throw NotFound("Card not found");
+        if (exists.int_at(0) != expected_revision)
+            throw RevisionConflict("Document was changed by another editor. Reload the saved version before saving.");
+        Statement update(db_, "UPDATE cards SET document_json=?,workbook=?,document_revision=document_revision+1,"
+                              "document_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND document_revision=?");
+        update.text(1, raw); update.blob(2, workbook); update.integer(3, id); update.integer(4, expected_revision);
+        update.step();
+        if (sqlite3_changes(db_) != 1) throw RevisionConflict("Document revision changed");
+        Statement q(db_, "SELECT document_revision,document_updated_at FROM cards WHERE id=?");
+        q.integer(1, id); q.step();
+        json result = {{"revision", q.int_at(0)}, {"updated_at", q.text_at(1)}};
+        exec(db_, "COMMIT");
+        return result;
+    } catch (...) { sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr); throw; }
 }

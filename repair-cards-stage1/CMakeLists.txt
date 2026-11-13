@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(RepairCards VERSION 0.2.0 LANGUAGES C CXX)
+project(RepairCards VERSION 0.3.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -8,7 +8,7 @@ add_library(sqlite3 STATIC third_party/sqlite3.c)
 target_include_directories(sqlite3 PUBLIC third_party)
 target_compile_definitions(sqlite3 PRIVATE SQLITE_THREADSAFE=1 SQLITE_OMIT_LOAD_EXTENSION)
 target_link_libraries(sqlite3 PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
-add_library(repair_core src/store.cpp src/sequence.cpp)
+add_library(repair_core src/store.cpp src/sequence.cpp src/document.cpp)
 target_include_directories(repair_core PUBLIC src third_party)
 target_link_libraries(repair_core PUBLIC sqlite3)
 add_executable(repair_server src/server.cpp)
@@ -52,6 +52,8 @@ endif()
 add_custom_command(TARGET repair_server POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
   "${CMAKE_CURRENT_SOURCE_DIR}/templates" "$<TARGET_FILE_DIR:repair_server>/templates"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+  "${CMAKE_CURRENT_SOURCE_DIR}/web" "$<TARGET_FILE_DIR:repair_server>/web"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
   "${CMAKE_CURRENT_SOURCE_DIR}/config.example.json" "$<TARGET_FILE_DIR:repair_server>/config.example.json")
 include(CTest)
@@ -71,4 +73,10 @@ if(BUILD_TESTING)
     target_compile_options(client_tests PRIVATE /utf-8)
   endif()
   add_test(NAME client_tests COMMAND client_tests)
+  add_executable(document_tests tests/document_tests.cpp)
+  target_link_libraries(document_tests PRIVATE repair_core)
+  if(MSVC)
+    target_compile_options(document_tests PRIVATE /utf-8)
+  endif()
+  add_test(NAME document_tests COMMAND document_tests)
 endif()

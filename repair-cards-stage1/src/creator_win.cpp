@@ -173,12 +173,12 @@ public:
             column.pszText = const_cast<wchar_t*>(names[i]); column.cx = unit(i == 0 ? 140 : 220);
             ListView_InsertColumn(list, i, &column);
         }
-        open = control(window, L"BUTTON", L"Открыть бланк", WS_TABSTOP, Open, font);
+        open = control(window, L"BUTTON", L"Редактировать", WS_TABSTOP, Open, font);
         refresh = control(window, L"BUTTON", L"Обновить", WS_TABSTOP, Refresh, font);
         previous = control(window, L"BUTTON", L"Назад", WS_TABSTOP, Previous, font);
         next = control(window, L"BUTTON", L"Следующие 100", WS_TABSTOP, Next, font);
         status = control(window, L"STATIC", L"Запустите сервер и нажмите «Подключить».", 0, -1, font);
-        note = control(window, L"STATIC", L"Этап 2.1: регистрация партий. Редактор бланка и печать QR — следующие шаги.", 0, -1, font);
+        note = control(window, L"STATIC", L"Редактирование бланка открывается в браузере. Изменения сохраняются кнопкой «Сохранить».", 0, -1, font);
         SetTimer(window, 1, 60, nullptr);
         fill_platforms(0); layout(); enable_controls();
     }
@@ -281,7 +281,7 @@ public:
     void open_card() {
         auto url = base(); int index = ListView_GetNextItem(list, -1, LVNI_SELECTED);
         if (index < 0) return;
-        auto link = wide(url + "/cards/" + std::to_string(cards.at(index).at("id").get<long long>()));
+        auto link = wide(url + "/edit/" + std::to_string(cards.at(index).at("id").get<long long>()));
         auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", link.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
         if (result <= 32) throw repair::ApiError("Не удалось открыть браузер.");
     }
@@ -431,7 +431,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     if (!RegisterClassW(&prompt_class)) return 1;
     App app;
     HDC dc = GetDC(nullptr); int dpi = GetDeviceCaps(dc, LOGPIXELSX); ReleaseDC(nullptr, dc);
-    HWND window = CreateWindowExW(0, L"RepairCreator", L"Креатор — Карточки ремонта (этап 2.1)",
+    HWND window = CreateWindowExW(0, L"RepairCreator", L"Креатор — Карточки ремонта (этап 2.2)",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1050, dpi, 96), MulDiv(730, dpi, 96),
         nullptr, nullptr, instance, &app);
     if (!window) { MessageBoxW(nullptr, L"Не удалось открыть окно Креатора.", L"Креатор", MB_OK | MB_ICONERROR); return 1; }

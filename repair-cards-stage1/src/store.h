@@ -6,6 +6,7 @@
 
 using json = nlohmann::json;
 struct NotFound : std::runtime_error { using std::runtime_error::runtime_error; };
+struct RevisionConflict : std::runtime_error { using std::runtime_error::runtime_error; };
 
 class Store {
 public:
@@ -20,6 +21,9 @@ public:
     json cards(long long platform, int limit, long long after);
     json card(long long id);
     std::string workbook(long long id);
+    json document(long long id);
+    json save_document(long long id, long long expected_revision, const json& document,
+                       const std::string& workbook);
 private:
     sqlite3* db_ = nullptr;
     std::mutex mutex_;

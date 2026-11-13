@@ -26,3 +26,5 @@ abd1514e0351f79393d1be882830afdb40a8099e8257f311f0bfdf8486f11bea  sqlite3.h
 9e5cafaa227dad5c10e837990a736cecaff03258f50d37067cedeee1dba5d344  httplib.h
 aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63  json.hpp
 ```
+
+Browser library versions, licenses and hashes: `../web/assets/README.md`.
