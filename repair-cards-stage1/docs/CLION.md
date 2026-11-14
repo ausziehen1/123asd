@@ -59,7 +59,7 @@ Visual Studio и MSVC для этого проекта не нужны. Испо
 Ожидаемые строки в консоли:
 
 ```text
-Repair Cards 0.4.0
+Repair Cards 0.4.1
 Database: .../data/repair.sqlite3
 Listen: http://0.0.0.0:8080
 Stop: Ctrl+C

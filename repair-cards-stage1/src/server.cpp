@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
         auto configured_url=config.value("public_url",std::string());
         if(!configured_url.empty())store.set_setting("public_url",repair::normalize_public_url(configured_url),true);
         const bool local_only=host=="127.0.0.1"||host=="localhost"||host=="::1";
-        auto server_info=[&]{return json{{"version","0.4.0"},{"server_id",store.setting("server_id")},
+        auto server_info=[&]{return json{{"version","0.4.1"},{"server_id",store.setting("server_id")},
             {"public_url",store.setting("public_url")},{"local_only",local_only},{"listen_host",host},{"port",port},
             {"suggested_urls",network_urls(port)}};};
         httplib::Server server;
@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
             res.set_content(read_file(web_root / "assets" / name), type);
         }));
         server.Get("/api/health", safe([&](const auto&, auto& res) {
-            send(res, {{"status", "ok"}, {"version", "0.4.0"}, {"sqlite", sqlite3_libversion()}});
+            send(res, {{"status", "ok"}, {"version", "0.4.1"}, {"sqlite", sqlite3_libversion()}});
         }));
         server.Get("/api/server-info",safe([&](const auto&,auto& res){send(res,server_info());}));
         server.Post("/api/labels/cards",safe([&](const auto& req,auto& res){
@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
             if (res.body.empty()) send(res, {{"error", "Route not found"}}, res.status);
         });
         if(!server.bind_to_port(host,port))throw std::runtime_error("Cannot listen on configured host/port");
-        std::cout << "Repair Cards 0.4.0\nDatabase: " << database.u8string()
+        std::cout << "Repair Cards 0.4.1\nDatabase: " << database.u8string()
                   << "\nListen: http://" << host << ':' << port << "\nStop: Ctrl+C\n" << std::flush;
         if(host=="0.0.0.0")std::cout<<"Local browser: http://127.0.0.1:"<<port<<"\nQR address is configured in Creator.\n"<<std::flush;
         if (!server.listen_after_bind()) throw std::runtime_error("Server stopped unexpectedly");

@@ -40,6 +40,7 @@ void file(const std::filesystem::path& path, const std::string& data) {
 }
 }
 std::string normalize_public_url(const std::string& input) {
+    if(trim(input).empty())throw ApiError("Выберите или введите сетевой адрес ПК с сервером в поле «Сетевой адрес в QR», например http://192.168.1.50:8080.");
     auto base = normalize_server_url(trim(input));
     auto host = base.substr(7);
     std::transform(host.begin(),host.end(),host.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
@@ -112,8 +113,9 @@ std::filesystem::path write_label_job(const std::filesystem::path& parent,const 
     return directory;
 }
 std::vector<std::string> bartender_arguments(const std::string& btw,const std::string& csv,bool print_dialog) {
-    if(btw.empty() || csv.empty())throw ApiError("Укажите шаблон BarTender и файл задания.");
-    std::vector<std::string> args={"/AF="+btw,"/D="+csv,"/DbTextHeader=1","/C=1","/S=1"};
+    if(btw.empty() || (print_dialog&&csv.empty()))throw ApiError("Укажите шаблон BarTender и файл задания.");
+    std::vector<std::string> args={"/MAX","/AF="+btw};
+    if(!csv.empty())args.insert(args.end(),{"/D="+csv,"/DbTextHeader=1","/C=1","/S=1"});
     if(print_dialog)args.push_back("/FPD");
     return args;
 }
@@ -121,5 +123,24 @@ std::wstring quote_windows_argument(const std::wstring& s) {
     std::wstring result=L"\"";size_t slashes=0;
     for(wchar_t c:s){if(c==L'\\'){slashes++;continue;}if(c==L'"'){result.append(slashes*2+1,L'\\');result+=c;}else{result.append(slashes,L'\\');result+=c;}slashes=0;}
     result.append(slashes*2,L'\\');return result+L'"';
+}
+std::wstring bartender_command_line(const std::wstring& executable,const std::vector<std::wstring>& arguments) {
+    auto valid=[](const std::wstring& s){
+        return !s.empty()&&s.find_first_of(L"\"\r\n") == std::wstring::npos&&s.find(L'\0')==std::wstring::npos;
+    };
+    if(!valid(executable))throw ApiError("Некорректный путь BarTender.");
+    std::wstring command=quote_windows_argument(executable);
+    for(const auto& arg:arguments){
+        // BarTender parses the raw command line itself. Keep the slash and
+        // parameter name outside quotes: /AF="path", never "/AF=path".
+        if(arg.rfind(L"/AF=",0)==0||arg.rfind(L"/D=",0)==0){
+            auto equal=arg.find(L'=');auto value=arg.substr(equal+1);
+            if(!valid(value))throw ApiError("Некорректный путь шаблона или задания BarTender.");
+            command+=L" "+arg.substr(0,equal+1)+quote_windows_argument(value);
+        }else if(arg==L"/MAX"||arg==L"/FPD"||arg==L"/DbTextHeader=1"||arg==L"/C=1"||arg==L"/S=1"){
+            command+=L" "+arg;
+        }else throw ApiError("Неподдерживаемый параметр BarTender.");
+    }
+    return command;
 }
 }

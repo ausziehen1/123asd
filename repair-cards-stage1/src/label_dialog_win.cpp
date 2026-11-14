@@ -10,13 +10,39 @@
 namespace {
 using namespace repair::win;
 using repair::Json;
+struct WindowSearch { DWORD pid; std::wstring executable; HWND found{}; };
+HWND bartender_window(DWORD pid,const std::filesystem::path& executable){
+    WindowSearch search{pid,executable.wstring(),nullptr};
+    EnumWindows([](HWND window,LPARAM param)->BOOL{
+        auto& state=*reinterpret_cast<WindowSearch*>(param);
+        if(!IsWindowVisible(window)||GetWindowTextLengthW(window)==0||
+           !(GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION))return TRUE;
+        DWORD owner=0;GetWindowThreadProcessId(window,&owner);
+        bool matches=owner==state.pid;
+        if(!matches){
+            auto process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,owner);
+            if(process){
+                std::wstring path(32768,L'\0');DWORD size=static_cast<DWORD>(path.size());
+                if(QueryFullProcessImageNameW(process,0,path.data(),&size)){
+                    path.resize(size);matches=_wcsicmp(path.c_str(),state.executable.c_str())==0;
+                }
+                CloseHandle(process);
+            }
+        }
+        if(!matches)return TRUE;
+        state.found=window;return FALSE;
+    },reinterpret_cast<LPARAM>(&search));
+    return search.found;
+}
 enum Id { Public=200,Exe,Btw,ChooseExe,ChooseBtw,Prepare,CheckQr,Design,Print,Folder,Close };
 struct Dialog {
     HWND window{},owner{},public_edit{},exe_edit{},btw_edit{},prepare{},check{},design{},print{},folder{},status{};
     HFONT font{};int dpi=96;bool busy=false,closing=false,done=false;
     std::string api;Json cards,info,prefs;std::filesystem::path job;
     std::future<Json> task;
-    ~Dialog(){if(font)DeleteObject(font);}
+    HANDLE launch_process{};DWORD launch_pid{};ULONGLONG launch_started{},launch_checked{};
+    std::filesystem::path launch_executable;bool launch_printing=false;
+    ~Dialog(){if(launch_process)CloseHandle(launch_process);if(font)DeleteObject(font);}
     int u(int value)const{return MulDiv(value,dpi,96);}
     void move(HWND h,int x,int y,int w,int height){MoveWindow(h,u(x),u(y),u(w),u(height),TRUE);}
     HWND item(const wchar_t* type,const wchar_t* label,DWORD style,int id,int x,int y,int w,int h){auto c=control(window,type,label,style,id,font);move(c,x,y,w,h);return c;}
@@ -77,9 +103,45 @@ struct Dialog {
         SetTimer(window,1,60,nullptr);enable();
     }
     void enable(){
-        for(auto h:{public_edit,exe_edit,btw_edit,design})EnableWindow(h,!busy);
-        EnableWindow(prepare,!busy&&!info.value("local_only",true));
-        for(auto h:{check,print,folder})EnableWindow(h,!busy&&!job.empty());
+        bool ready=!busy&&!launch_process;
+        for(auto h:{public_edit,exe_edit,btw_edit,design})EnableWindow(h,ready);
+        EnableWindow(prepare,ready&&!info.value("local_only",true));
+        for(auto h:{check,print,folder})EnableWindow(h,ready&&!job.empty());
+    }
+    void diagnostic(const Json& event){
+        try{
+            auto entry=event;entry["time_ms"]=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            auto line=entry.dump()+"\n";
+            for(const auto& root:{profile_directory(),job})if(!root.empty()){
+                std::ofstream out(root/L"bartender-launch.log",std::ios::binary|std::ios::app);
+                if(out)out.write(line.data(),static_cast<std::streamsize>(line.size()));
+            }
+        }catch(const std::exception&){}
+    }
+    void finish_launch(){CloseHandle(launch_process);launch_process=nullptr;enable();}
+    std::wstring log_location(){return ((job.empty()?profile_directory():job)/L"bartender-launch.log").wstring();}
+    void poll_launch(){
+        if(!launch_process||GetTickCount64()-launch_checked<250)return;
+        launch_checked=GetTickCount64();
+        DWORD code=STILL_ACTIVE;
+        bool exited=WaitForSingleObject(launch_process,0)==WAIT_OBJECT_0;
+        if(exited&&GetExitCodeProcess(launch_process,&code)&&code!=0){
+            diagnostic({{"event","exit_error"},{"exit_code",code}});finish_launch();
+            message(L"BarTender завершился с ошибкой. Журнал: "+log_location());
+            throw repair::ApiError("BarTender завершился с кодом "+std::to_string(code)+". Проверьте, открывается ли рабочий .btw вручную. Журнал: "+utf8(log_location()));
+        }
+        auto window= bartender_window(launch_pid,launch_executable);
+        if(window){
+            auto popup=GetLastActivePopup(window);if(popup&&IsWindowVisible(popup))window=popup;
+            ShowWindowAsync(window,IsIconic(window)?SW_RESTORE:SW_SHOW);SetForegroundWindow(window);
+            diagnostic({{"event","visible_window"},{"title",utf8(text(window))},{"launcher_exited",exited}});
+            finish_launch();
+            message(launch_printing?L"Найдено окно BarTender. Проверьте диалог печати и предпросмотр в нем. Печать запускается вручную.":L"Найдено окно BarTender. Проверьте открытый макет; после правок сохраните его Ctrl+S.");
+        }else if(GetTickCount64()-launch_started>=15000){
+            diagnostic({{"event","no_visible_window"},{"launcher_exited",exited},{"exit_code",code}});finish_launch();
+            message(L"Видимое окно BarTender не найдено. Журнал: "+log_location());
+            throw repair::ApiError("За 15 секунд видимое окно BarTender не найдено. Проверьте ручное открытие рабочего .btw и редакцию BarTender (для CLI нужна Automation или Enterprise Automation). Журнал: "+utf8(log_location()));
+        }
     }
     void preferences(){prefs["exe"]=utf8(text(exe_edit));prefs["template"]=utf8(text(btw_edit));save_profile("printing.json",prefs);}
     void browse(HWND edit,bool executable){
@@ -96,16 +158,18 @@ struct Dialog {
         if(!std::filesystem::is_regular_file(exe))throw repair::ApiError("Укажите существующий bartend.exe кнопкой «Обзор».");
         if(!std::filesystem::is_regular_file(btw))throw repair::ApiError("Укажите существующий шаблон .btw.");
         if(printing&&job.empty())throw repair::ApiError("Сначала нажмите «Подготовить QR».");
-        preferences();std::vector<std::string> args;
-        if(job.empty())args={"/AF="+btw.u8string()};
-        else args=repair::bartender_arguments(btw.u8string(),(job/"labels.csv").u8string(),printing);
-        std::wstring command=repair::quote_windows_argument(exe.wstring());
-        for(const auto& arg:args)command+=L" "+repair::quote_windows_argument(wide(arg));
-        STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION process{};
-        if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,btw.parent_path().c_str(),&startup,&process))
-            throw repair::ApiError("Не удалось запустить BarTender. Код Windows: "+std::to_string(GetLastError()));
-        CloseHandle(process.hProcess);CloseHandle(process.hThread);
-        message(printing?L"Открывается диалог BarTender: выберите принтер, проверьте предпросмотр и настройки. Запуск печати — в BarTender.":L"Открывается макет BarTender. Можно менять расположение, размеры и источники данных; сохраняйте рабочий шаблон.");
+        preferences();std::vector<std::wstring> args;
+        for(const auto& arg:repair::bartender_arguments(btw.u8string(),job.empty()?std::string():(job/"labels.csv").u8string(),printing))args.push_back(wide(arg));
+        auto command=repair::bartender_command_line(exe.wstring(),args);
+        diagnostic({{"event","launch"},{"command_line",utf8(command)},{"working_directory",btw.parent_path().u8string()},{"print_dialog",printing}});
+        STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_SHOWNORMAL;PROCESS_INFORMATION process{};
+        if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,btw.parent_path().c_str(),&startup,&process)){
+            auto code=GetLastError();diagnostic({{"event","create_process_failed"},{"windows_error",code}});
+            throw repair::ApiError("Не удалось запустить BarTender. Код Windows: "+std::to_string(code));
+        }
+        CloseHandle(process.hThread);launch_process=process.hProcess;launch_pid=process.dwProcessId;
+        launch_executable=exe;launch_printing=printing;launch_started=GetTickCount64();launch_checked=0;enable();
+        message(L"Команда отправлена BarTender. Проверяем появление окна…");
     }
     void prepare_job(){
         auto url=repair::normalize_public_url(utf8(text(public_edit)));auto rows=cards;
@@ -122,6 +186,7 @@ struct Dialog {
         });}catch(...){busy=false;enable();throw;}
     }
     void poll(){
+        poll_launch();
         if(!busy||!task.valid()||task.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
         try{auto result=task.get();busy=false;if(closing){done=true;return;}job=std::filesystem::u8path(result.at("directory").get<std::string>());info=result.at("info");message(L"Задание готово. Этикеток: "+std::to_wstring(cards.size())+L". Проверьте QR-ссылки или откройте макет и предпросмотр BarTender.");}
         catch(const std::exception& e){busy=false;if(closing){done=true;return;}error(e);message(L"Подготовка не завершена. Проверьте адрес, доступ по сети и сообщение об ошибке.");}
@@ -130,7 +195,7 @@ struct Dialog {
     void open_file(const std::filesystem::path& path){if(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)throw repair::ApiError("Не удалось открыть файл задания.");}
     void command(int id,int event){
         if(id==Close){if(busy){closing=true;message(L"Завершаем подготовку…");}else done=true;return;}
-        if(busy)return;
+        if(busy||launch_process)return;
         if(id==Public&&(event==CBN_EDITCHANGE||event==CBN_SELCHANGE)){job.clear();enable();}
         else if(id==ChooseExe)browse(exe_edit,true);
         else if(id==ChooseBtw)browse(btw_edit,false);
@@ -152,7 +217,7 @@ void show_label_dialog(HWND owner,const std::string& api_base,const repair::Json
     cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
     RegisterClassW(&cls);Dialog state;state.owner=owner;state.api=api_base;state.cards=cards;state.info=server_info;
     HDC dc=GetDC(owner);auto dpi=GetDeviceCaps(dc,LOGPIXELSX);ReleaseDC(owner,dc);
-    auto window=CreateWindowExW(WS_EX_DLGMODALFRAME,cls.lpszClassName,L"QR и печать через BarTender",WS_CAPTION|WS_SYSMENU|WS_POPUP,
+    auto window=CreateWindowExW(WS_EX_DLGMODALFRAME,cls.lpszClassName,L"QR и печать через BarTender — 0.4.1",WS_CAPTION|WS_SYSMENU|WS_POPUP,
         CW_USEDEFAULT,CW_USEDEFAULT,MulDiv(850,dpi,96),MulDiv(620,dpi,96),owner,nullptr,cls.hInstance,&state);
     if(!window)throw repair::ApiError("Не удалось открыть окно печати.");
     EnableWindow(owner,FALSE);ShowWindow(window,SW_SHOW);MSG msg{};

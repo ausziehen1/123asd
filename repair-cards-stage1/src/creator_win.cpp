@@ -480,7 +480,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     if (!RegisterClassW(&prompt_class)) return 1;
     App app;
     HDC dc = GetDC(nullptr); int dpi = GetDeviceCaps(dc, LOGPIXELSX); ReleaseDC(nullptr, dc);
-    HWND window = CreateWindowExW(0, L"RepairCreator", L"Креатор — Карточки ремонта 0.4",
+    HWND window = CreateWindowExW(0, L"RepairCreator", L"Креатор — Карточки ремонта 0.4.1",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1050, dpi, 96), MulDiv(730, dpi, 96),
         nullptr, nullptr, instance, &app);
     if (!window) { MessageBoxW(nullptr, L"Не удалось открыть окно Креатора.", L"Креатор", MB_OK | MB_ICONERROR); return 1; }

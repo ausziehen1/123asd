@@ -16,4 +16,5 @@ std::string labels_csv(const std::vector<Label>& labels);
 std::filesystem::path write_label_job(const std::filesystem::path& parent, const std::vector<Label>& labels);
 std::vector<std::string> bartender_arguments(const std::string& btw, const std::string& csv, bool print_dialog);
 std::wstring quote_windows_argument(const std::wstring& argument);
+std::wstring bartender_command_line(const std::wstring& executable, const std::vector<std::wstring>& arguments);
 }

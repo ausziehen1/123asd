@@ -26,10 +26,20 @@ int main(int argc,char** argv){
         auto duplicate=cards;duplicate.push_back(cards[0]);
         raises<repair::ApiError>([&]{repair::make_labels(duplicate,base);});
         auto args=repair::bartender_arguments("C:/Labels/Repair cards.btw","C:/Jobs/job 1/labels.csv",false);
-        require(args[0]=="/AF=C:/Labels/Repair cards.btw"&&args[1]=="/D=C:/Jobs/job 1/labels.csv","BarTender paths");
-        require(args.size()==5&&args[3]=="/C=1"&&args[4]=="/S=1","Editing never starts printing");
+        require(args[0]=="/MAX"&&args[1]=="/AF=C:/Labels/Repair cards.btw"&&args[2]=="/D=C:/Jobs/job 1/labels.csv","BarTender paths and visible UI");
+        require(args.size()==6&&args[4]=="/C=1"&&args[5]=="/S=1","Editing never starts printing");
         auto print=repair::bartender_arguments("a.btw","a.csv",true);
-        require(print.size()==6&&print.back()=="/FPD","Print dialog requires user action");
+        require(print.size()==7&&print.back()=="/FPD","Print dialog requires user action");
+        auto design=repair::bartender_arguments("a.btw","",false);
+        require(design.size()==2&&design[1]=="/AF=a.btw","Designer can open before CSV preparation");
+        raises<repair::ApiError>([&]{repair::bartender_arguments("a.btw","",true);});
+        auto command=repair::bartender_command_line(L"C:\\Program Files (x86)\\Seagull\\bartend.exe",
+            {L"/MAX",L"/AF=C:\\Labels\\Мой макет.btw",L"/D=C:\\Jobs\\job 1\\labels.csv",L"/DbTextHeader=1",L"/C=1",L"/S=1",L"/FPD"});
+        require(command==L"\"C:\\Program Files (x86)\\Seagull\\bartend.exe\" /MAX /AF=\"C:\\Labels\\Мой макет.btw\" /D=\"C:\\Jobs\\job 1\\labels.csv\" /DbTextHeader=1 /C=1 /S=1 /FPD",
+                "Legacy BarTender syntax: switches outside quotes, only path values quoted");
+        require(repair::bartender_command_line(L"bartend.exe",{L"/MAX",L"/AF=a.btw"})==L"\"bartend.exe\" /MAX /AF=\"a.btw\"","Design command without CSV");
+        raises<repair::ApiError>([&]{repair::bartender_command_line(L"bartend.exe",{L"/P"});});
+        raises<repair::ApiError>([&]{repair::bartender_command_line(L"bartend.exe",{L"/AF=a\".btw"});});
         require(repair::quote_windows_argument(L"a b")==L"\"a b\"","Windows spaces quoting");
         require(repair::quote_windows_argument(L"a\"b")==L"\"a\\\"b\"","Windows quotes escaping");
         require(repair::quote_windows_argument(L"a\\")==L"\"a\\\\\"","Windows trailing slash escaping");
