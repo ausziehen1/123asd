@@ -1,5 +1,6 @@
 """Real HTTP concurrency and online backup; Python standard library only."""
 import base64, concurrent.futures, json, pathlib, socket, sqlite3, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request,io,zipfile,xml.etree.ElementTree as ET
+from contextlib import closing
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 EXE=pathlib.Path(sys.argv[1]).resolve();BACKUP=pathlib.Path(sys.argv[2]).resolve()
 def port():
@@ -103,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix='repair-multi-user-') as temp:
             assert outcome.returncode==0,(outcome.stdout,outcome.stderr)
         finally:stop.set();thread.join(timeout=30)
         assert not failures,failures
-        with sqlite3.connect(backup) as c:
+        with closing(sqlite3.connect(backup)) as c:
             assert c.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
             assert c.execute('SELECT count(*) FROM cards').fetchone()[0]==22
             assert c.execute('PRAGMA user_version').fetchone()[0]==5
@@ -112,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='repair-multi-user-') as temp:
         process.kill();process.wait(timeout=10);process=start()
         assert call('/api/cards/11/document')[1]==stored
         assert call('/api/batches',winner_body)[1]==winner
-        with sqlite3.connect(db) as c:assert c.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+        with closing(sqlite3.connect(db)) as c:assert c.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
         print('Multi-user checks passed: legacy compatibility, idempotent Creators, 12 queued writers all accepted, independent cells retained, last cell edit wins, canonical XLSX/history/live revisions, single database owner, online WAL backup and abrupt restart')
     finally:
         if process and process.poll() is None:process.terminate();process.wait(timeout=10)

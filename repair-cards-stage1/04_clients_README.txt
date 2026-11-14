@@ -1,8 +1,10 @@
-CURRENT RELEASE: 0.5.0
+CURRENT RELEASE: 0.6.0
 
-Start with docs/CLIENTS.md.
-Ready Windows programs are in ready-windows in the full ZIP.
-Start repair_server.exe, then Creator.exe / Reader.exe / Repair.exe.
-Keep RepairClient.dll, WebView2Loader.dll and installation.json beside the EXE.
-Embedded forms require Microsoft Edge WebView2 Runtime Evergreen x64.
-Back up your existing data and config before the server schema upgrade.
+Full guide: docs/USER_GUIDE.md.
+Distribute ONE EXE from clients: Creator.exe, Reader.exe or Repair.exe.
+The standalone EXE extracts DLLs into the user's LocalAppData cache.
+Multiple instances are supported. Saves are queued and merged; forms refresh automatically.
+
+Server: ready-windows/START-SERVER.cmd. Back up existing data before schema upgrade to 5.
+The normal EXEs in ready-windows still need adjacent DLLs; use clients for one-file distribution.
+Embedded forms need Microsoft WebView2 Runtime Evergreen x64 once per PC.

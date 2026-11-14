@@ -1,29 +1,33 @@
-# Repair Cards — 0.5.0
+# Repair Cards 0.6.0
 
-[Полный архив: исходники и готовые Windows EXE/DLL](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-full.zip)
+**[Скачать полный проект: готовый сервер, однофайловые клиенты и исходники](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.6.0-full.zip)**
 
-Отдельные комплекты:
+**[Полная пошаговая инструкция](repair-cards-stage1/docs/USER_GUIDE.md)**: установка, перенос существующей базы, совместная работа, BarTender, история, резервирование, будущие обновления и откат.
 
-- [Creator](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-creator-win64.zip)
-- [Reader](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-reader-win64.zip)
-- [Repair](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-repair-win64.zip)
+Пользователям передается **один** файл нужного приложения:
 
-[Обновление и пошаговый запуск](repair-cards-stage1/docs/CLIENTS.md)
+- [Creator.exe](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/0.6.0/Creator.exe) — регистрация, редактирование, коды 1С, QR/BarTender.
+- [Reader.exe](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/0.6.0/Reader.exe) — встроенный просмотр.
+- [Repair.exe](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/0.6.0/Repair.exe) — встроенное редактирование и сохранение.
+- [Все три однофайловых клиента и инструкция одним ZIP](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.6.0-clients.zip).
 
-В Creator — распределение кодов 1С группами «кол-во / код», плюс справа у последней строки и минус у предыдущих, предварительное назначение каждому номеру. Код сохраняется в SQLite, бланке и XLSX и передается BarTender как OneCCode. В макете один раз добавьте текстовый объект с этим источником; QRUrl остается прежним.
+EXE сам размещает DLL/Updater/справку в LocalAppData. Можно запускать несколько экземпляров каждого приложения на одном или нескольких ПК. Для встроенного бланка один раз нужен Microsoft WebView2 Runtime Evergreen x64; Creator для печати использует установленный BarTender и драйвер принтера. Обычные маленькие EXE в ready-windows предназначены для комплекта с соседними DLL; для раздачи одного файла берите clients или ссылки выше.
 
-Reader показывает бланк во встроенном окне, Repair позволяет редактировать и сохранять. Все три клиента имеют QR-иконку и общую спокойную тему. Подтвержденный сервер скрывается, повторно показывается по нажатию «Сервер»; Enter открывает QR.
+SQLite остается на локальном диске одного сервера. Сохранения новых клиентов идут через FIFO-очередь: разные ячейки объединяются, одинаковая получает последнее значение. При пересекающихся изменениях структуры применяется поздний лист целиком. Предыдущие версии доступны через «История». Бланки получают обновления примерно раз в секунду, списки Creator — раз в три секунды; активный ввод не прерывается.
 
-Клиентская логика находится в RepairClient.dll. Следующие локальные ZIP-патчи устанавливает Updater.exe с проверкой версии/ABI/хешей, резервной копией и откатом. Комплекты нужно распаковывать целиком. Для встроенных бланков один раз требуется Microsoft WebView2 Runtime Evergreen x64.
+Перед переходом с 0.5 остановите старый сервер, сохраните data/конфиг/LocalAppData RepairCards и следуйте разделу 3 инструкции. Схема обновляется до 5. Для новой очереди и живого обновления замените **все клиенты**. Не запускайте пустую базу вместо прежней.
 
-Перед первым обновлением сервера остановите приложения, сохраните data, конфиг и LocalAppData/RepairCards. Схема обновляется до 4, существующие номера и документы сохраняются. В полном ZIP папка ready-windows содержит все программы; ее конфиг использует ../data/repair.sqlite3. Проверьте свой фактический путь базы.
+Сервер запускается ready-windows/START-SERVER.cmd; свой конфиг — config.local.json. Для живой резервной копии включен repair_backup.exe (SQLite Backup API + integrity_check). Для будущих обновлений можно заменить один EXE либо установить локальный ZIP-патч DLL через меню приложения/параметр --update. Параметр --files открывает каталог соответствующего комплекта.
 
-[Проверки и их границы](repair-cards-stage1/VALIDATION.md) · [Windows CI](https://github.com/ausziehen1/123asd/actions/workflows/repair-cards-windows.yml?query=branch%3Arepair-cards-stage1)
+[Реальный DLL-патч обычного комплекта 0.5.0 → 0.6.0](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-to-0.6.0-client-patch.zip) применяется старым Updater **после обновления сервера и web**. Однофайловое распространение требует новых EXE; сам DLL-патч маленькие старые EXE в однофайловые не превращает.
 
-SHA-256: [полный архив](downloads/RepairCards-0.5.0-full.zip.sha256), [Creator](downloads/RepairCards-0.5.0-creator-win64.zip.sha256), [Reader](downloads/RepairCards-0.5.0-reader-win64.zip.sha256), [Repair](downloads/RepairCards-0.5.0-repair-win64.zip.sha256).
+[Проверки и их границы](repair-cards-stage1/VALIDATION.md) · [Windows CI](https://github.com/ausziehen1/123asd/actions/workflows/repair-cards-windows.yml?query=branch%3Arepair-cards-stage1).
+
+Контрольные суммы SHA-256: [полный ZIP](downloads/RepairCards-0.6.0-full.zip.sha256), [клиенты ZIP](downloads/RepairCards-0.6.0-clients.zip.sha256), [Creator](downloads/0.6.0/Creator.exe.sha256), [Reader](downloads/0.6.0/Reader.exe.sha256), [Repair](downloads/0.6.0/Repair.exe.sha256), [DLL-патч](downloads/RepairCards-0.5.0-to-0.6.0-client-patch.zip.sha256).
 
 ## Предыдущие версии
 
+- [0.5.0](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-full.zip)
 - [0.4.1](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4.1-full.zip)
 - [0.4](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4-full.zip)
 - [0.3](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-editor.zip)
