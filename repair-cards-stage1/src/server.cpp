@@ -12,6 +12,9 @@
 #include <limits>
 #include <sstream>
 #include <random>
+#ifdef _WIN32
+#include <shellapi.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -102,7 +105,15 @@ int main(int argc, char** argv) {
 #endif
         fs::path config_path = fs::u8path("config.example.json");
         if(argc==1&&fs::exists(executable_parent/"config.example.json"))config_path=executable_parent/"config.example.json";
-        if (argc == 3 && std::string(argv[1]) == "--config") config_path = fs::u8path(argv[2]);
+        if (argc == 3 && std::string(argv[1]) == "--config") {
+#ifdef _WIN32
+            int wide_count=0;auto arguments=CommandLineToArgvW(GetCommandLineW(),&wide_count);
+            if(!arguments||wide_count!=3){if(arguments)LocalFree(arguments);throw InputError("Cannot read config path");}
+            config_path=fs::path(arguments[2]);LocalFree(arguments);
+#else
+            config_path = fs::u8path(argv[2]);
+#endif
+        }
         else if (argc != 1) throw InputError("Usage: repair_server [--config path.json]");
         config_path = fs::absolute(config_path);
         auto config = json::parse(read_file(config_path));

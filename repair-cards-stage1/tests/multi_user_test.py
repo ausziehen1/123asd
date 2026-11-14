@@ -6,7 +6,7 @@ EXE=pathlib.Path(sys.argv[1]).resolve();BACKUP=pathlib.Path(sys.argv[2]).resolve
 def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
 with tempfile.TemporaryDirectory(prefix='repair-multi-user-') as temp:
-    root=pathlib.Path(temp);db=root/'данные'/'repair.sqlite3';config=root/'config.json';base=f'http://127.0.0.1:{port()}'
+    root=pathlib.Path(temp);db=root/'данные'/'repair.sqlite3';config=root/'сервер.json';base=f'http://127.0.0.1:{port()}'
     settings={'host':'127.0.0.1','port':int(base.rsplit(':',1)[1]),'database':str(db),'template':str(ROOT/'templates/blank.xlsx'),'web':str(ROOT/'web')}
     config.write_text(json.dumps(settings),encoding='utf-8');log=(root/'server.log').open('w+');process=None
     def call(path,body=None,method=None):

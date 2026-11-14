@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include "api_client.h"
 namespace {
 std::atomic<int> result{1};
 void require(bool condition,const char* message){if(!condition)throw std::runtime_error(message);}
@@ -39,8 +40,17 @@ int main(int argc,char** argv){if(argc!=2)return 2;std::wstring base;for(const u
   click(GetDlgItem(panel,505));set(506,L"1");click(GetDlgItem(panel,508));
   require(IsWindowEnabled(prepare),"Four-group allocation must be valid");
   GetClientRect(panel,&groupRect);GetWindowRect(GetDlgItem(panel,511),&fieldRect);MapWindowPoints(nullptr,panel,reinterpret_cast<POINT*>(&fieldRect),2);require(fieldRect.left>=0&&fieldRect.right<=groupRect.right&&fieldRect.top>=0&&fieldRect.bottom<=groupRect.bottom,"Plus button must remain visible after scrollbar appears");
-  PostMessageW(dialog,WM_CLOSE,0,0);wait([&]{return !IsWindow(dialog);});PostMessageW(main,WM_CLOSE,0,0);result=0;
-  std::cout<<"Native Creator UI passed: connect, select 10 cards, add/remove groups, 2/7/1 mapping, blank code, sum validation and row layout\n";
+  PostMessageW(dialog,WM_CLOSE,0,0);wait([&]{return !IsWindow(dialog);});
+  SendMessageW(GetDlgItem(main,102),CB_SETCURSEL,1,0);SendMessageW(main,WM_COMMAND,MAKEWPARAM(102,CBN_SELCHANGE),reinterpret_cast<LPARAM>(GetDlgItem(main,102)));
+  auto first=GetDlgItem(main,104);wait([&]{return IsWindowEnabled(first)&&text(first)==L"V00011";});
+  selected.state=LVIS_SELECTED;SendMessageW(list,LVM_SETITEMSTATE,0,reinterpret_cast<LPARAM>(&selected));
+  auto ui_thread=GetWindowThreadProcessId(main,nullptr);require(AttachThreadInput(GetCurrentThreadId(),ui_thread,TRUE),"Cannot attach input for native focus test");SetForegroundWindow(main);SetFocus(first);AttachThreadInput(GetCurrentThreadId(),ui_thread,FALSE);
+  GUITHREADINFO focus{};focus.cbSize=sizeof(focus);require(GetGUIThreadInfo(ui_thread,&focus)&&focus.hwndFocus==first,"Table ID input focus missing");
+  SendMessageW(first,WM_SETTEXT,0,reinterpret_cast<LPARAM>(L""));
+  std::string endpoint;for(auto c:base)endpoint+=static_cast<char>(c);repair::ApiClient api(endpoint);auto platform=api.platforms().at(0).at("id").get<long long>();api.register_batch(platform,"Q00001",1);
+  wait([&]{return SendMessageW(list,LVM_GETITEMCOUNT,0,0)==11;});require(text(first).empty(),"Live refresh interrupted empty Table ID input");require(SendMessageW(list,LVM_GETSELECTEDCOUNT,0,0)==1,"Live refresh lost card selection");
+  PostMessageW(main,WM_CLOSE,0,0);result=0;
+  std::cout<<"Native Creator UI passed: connect, select 10 cards, add/remove groups, 2/7/1 mapping, blank code, sum validation, row layout and live refresh preserving active Table ID input/selection\n";
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';ExitProcess(1);}});
  auto code=run(0,SW_SHOW);automation.join();return code?code:result.load();
 }

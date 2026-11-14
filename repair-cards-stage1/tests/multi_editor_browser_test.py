@@ -73,7 +73,9 @@ with tempfile.TemporaryDirectory(prefix='repair-multi-editor-') as temp:
             with b.expect_download() as download:initial.get_by_text('Скачать XLSX').click()
             original=root/'original.xlsx';download.value.save_as(original);assert load_workbook(original).active['F9'].value!='First user saved'
             target=b.locator('.history-row').filter(has_text=re.compile(r'Версия 1 ·'))
-            target.get_by_text('Восстановить',exact=True).click();expect(b.locator('#state')).to_contain_text('Бланк открыт')
+            with b.expect_response(lambda response:response.url.endswith('/api/cards/1/restore') and response.request.method=='POST') as restored:target.get_by_text('Восстановить',exact=True).click()
+            assert restored.value.status==200
+            expect(b.locator('#state')).to_contain_text('Бланк открыт')
             assert b.evaluate('repairSheet.cell(8,5).text')=='First user saved'
             assert call('/api/cards/1/document')['revision']==before+2
             reader.bring_to_front();value(reader,8,5,'First user saved')
@@ -81,6 +83,17 @@ with tempfile.TemporaryDirectory(prefix='repair-multi-editor-') as temp:
             with urllib.request.urlopen(BASE+'/api/cards/1/workbook') as response:book=load_workbook(io.BytesIO(response.read()))
             assert book.active['F9'].value=='First user saved' and 'B1:L1' in book.active.merged_cells
             assert 'RepairCards_OneCCode' in book.defined_names
+            # Initial history has the original XLSX but no saved JSON yet.
+            # Await the POST, not an already-visible pre-navigation status.
+            b.locator('#history').click()
+            initial=b.locator('.history-row').filter(has_text=re.compile(r'Версия 0 ·'))
+            with b.expect_response(lambda response:response.url.endswith('/api/cards/1/restore') and response.request.method=='POST') as restored:initial.get_by_text('Восстановить',exact=True).click()
+            assert restored.value.status==200
+            b.wait_for_function('()=>window.repairSheet&&(repairSheet.cell(8,5)?.text||"")!=="First user saved"')
+            assert call('/api/cards/1/document')['revision']==before+3
+            with urllib.request.urlopen(BASE+'/api/cards/1/workbook') as response:initial_book=load_workbook(io.BytesIO(response.read()))
+            assert initial_book.active['B3'].value=='#ID V00001' and initial_book.active['F9'].value!='First user saved'
+            assert 'RepairCards_OneCCode' in initial_book.defined_names
             assert not errors,errors
             first.close();second.close();view.close();browser.close()
         print('Live multi-editor checks passed: stale snapshots merge, later shared cell wins, Reader/editor refresh, active typing/draft preserved, XLSX export, lost reply idempotency, history download/restore and formatting')

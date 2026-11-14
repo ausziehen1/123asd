@@ -433,10 +433,14 @@ public:
             try{
                 auto result=live_future.get();
                 if(busy||closing||!IsWindowEnabled(window)||result.at("generation").get<unsigned long>()!=generation||result.at("platform").get<long long>()!=selected_platform()||result.at("after").get<long long>()!=current_after||result.at("base").get<std::string>()!=connected_base)return;
+                if(result.at("platforms")==platforms&&result.at("cards")==cards)return;
+                if(SendMessageW(platform,CB_GETDROPPEDSTATE,0,0))return;
                 std::vector<long long> selected;int index=-1;while((index=ListView_GetNextItem(list,index,LVNI_SELECTED))>=0)selected.push_back(cards.at(index).at("id").get<long long>());
+                int top=ListView_GetTopIndex(list);RECT item_rect{};int row_height=ListView_GetItemRect(list,0,&item_rect,LVIR_BOUNDS)?item_rect.bottom-item_rect.top:unit(20);
                 auto entered=text(first);std::wstring suggestion;for(const auto& p:platforms)if(p.at("id").get<long long>()==selected_platform())suggestion=wide(p.value("next_product_id",std::string()));
-                auto platform_id=selected_platform();platforms=result.at("platforms");fill_platforms(platform_id);if(!entered.empty()&&entered!=suggestion)set_text(first,entered);
-                render_cards(result.at("cards"));for(size_t i=0;i<cards.size();i++)if(std::find(selected.begin(),selected.end(),cards[i].at("id").get<long long>())!=selected.end())ListView_SetItemState(list,static_cast<int>(i),LVIS_SELECTED,LVIS_SELECTED);enable_controls();
+                bool keep_entered=GetFocus()==first||(!entered.empty()&&entered!=suggestion);
+                auto platform_id=selected_platform();platforms=result.at("platforms");fill_platforms(platform_id);if(keep_entered)set_text(first,entered);
+                render_cards(result.at("cards"));for(size_t i=0;i<cards.size();i++)if(std::find(selected.begin(),selected.end(),cards[i].at("id").get<long long>())!=selected.end())ListView_SetItemState(list,static_cast<int>(i),LVIS_SELECTED,LVIS_SELECTED);if(top>0)ListView_Scroll(list,0,top*row_height);enable_controls();
             }catch(const std::exception&){set_text(status,L"Нет связи с сервером. Показан последний загруженный список; повторяем подключение.");}
         }
         if(live_future.valid()||busy||closing||connected_base.empty()||!IsWindowEnabled(window)||GetTickCount64()-last_live<3000)return;
