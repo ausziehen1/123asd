@@ -19,6 +19,7 @@ public:
     Json set_public_url(const std::string& url) const;
     Json card(long long id) const;
     Json resolve_cards(const Json& ids) const;
+    Json assign_codes(const Json& cards,const Json& groups) const;
     Json platforms() const;
     Json add_platform(const std::string& name) const;
     Json cards(long long platform, long long after = 0) const;

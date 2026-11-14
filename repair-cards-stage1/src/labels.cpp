@@ -77,7 +77,7 @@ std::vector<Label> make_labels(const Json& cards,const std::string& public_url) 
             card.at("id")>std::numeric_limits<long long>::max()) throw ApiError("Некорректный внутренний номер.");
         auto id=card.at("id").get<long long>();
         if (!seen.insert(id).second) throw ApiError("В задании одна карточка выбрана дважды.");
-        result.push_back({id,card.at("product_id").get<std::string>(),card.at("platform_name").get<std::string>(),card_url(base,id)});
+        result.push_back({id,card.at("product_id").get<std::string>(),card.at("platform_name").get<std::string>(),card_url(base,id),card.value("one_c_code",std::string())});
     }
     return result;
 }
@@ -92,8 +92,8 @@ std::string qr_svg(const std::string& text) {
 }
 std::string labels_csv(const std::vector<Label>& labels) {
     auto quote=[](const std::string& value){std::string out="\"";for(char c:value){out+=c;if(c=='"')out+='"';}return out+'"';};
-    std::string out="\xEF\xBB\xBF\"InternalID\",\"ProductID\",\"Platform\",\"QRUrl\"\r\n";
-    for(const auto& label:labels)out+=quote(std::to_string(label.id))+","+quote(label.product_id)+","+quote(label.platform)+","+quote(label.url)+"\r\n";
+    std::string out="\xEF\xBB\xBF\"InternalID\",\"ProductID\",\"Platform\",\"QRUrl\",\"OneCCode\"\r\n";
+    for(const auto& label:labels)out+=quote(std::to_string(label.id))+","+quote(label.product_id)+","+quote(label.platform)+","+quote(label.url)+","+quote(label.one_c_code)+"\r\n";
     return out;
 }
 std::filesystem::path write_label_job(const std::filesystem::path& parent,const std::vector<Label>& labels) {
@@ -106,8 +106,8 @@ std::filesystem::path write_label_job(const std::filesystem::path& parent,const 
     for(size_t i=0;i<labels.size();i++) {
         const auto& label=labels[i];auto name="qr-"+std::to_string(i+1)+".svg";
         file(directory/name,qr_svg(label.url));
-        page+="<section><img src='"+name+"' alt='QR'><p><b>"+html(label.product_id)+"</b><br>"+html(label.platform)+"</p><small>Внутренний ID: "+std::to_string(label.id)+"<br><a href='"+html(label.url)+"'>"+html(label.url)+"</a></small></section>";
-        manifest.push_back({{"internal_id",label.id},{"product_id",label.product_id},{"platform",label.platform},{"qr_url",label.url}});
+        page+="<section><img src='"+name+"' alt='QR'><p><b>"+html(label.product_id)+"</b><br>"+html(label.platform)+"<br>1C Code: "+html(label.one_c_code)+"</p><small>Внутренний ID: "+std::to_string(label.id)+"<br><a href='"+html(label.url)+"'>"+html(label.url)+"</a></small></section>";
+        manifest.push_back({{"internal_id",label.id},{"product_id",label.product_id},{"platform",label.platform},{"qr_url",label.url},{"one_c_code",label.one_c_code}});
     }
     file(directory/"labels.csv",labels_csv(labels));file(directory/"preview.html",page+"</html>");file(directory/"manifest.json",manifest.dump(2));
     return directory;

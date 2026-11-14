@@ -22,6 +22,7 @@ public:
     json cards(long long platform, int limit, long long after);
     json card(long long id);
     json card_set(const std::vector<long long>& ids);
+    json assign_codes(const json& cards, const json& groups);
     std::string workbook(long long id);
     json document(long long id);
     json save_document(long long id, long long expected_revision, const json& document,

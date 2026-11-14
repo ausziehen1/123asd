@@ -3,77 +3,69 @@
 #include <shellapi.h>
 #include "win_support.h"
 #include "labels.h"
+#include "viewer_win.h"
 #include <future>
 #include <chrono>
-
 namespace {
 using namespace repair::win;
-enum Id { Base=100,Input,Open,Status };
-struct Reader {
-    HWND window{},base{},input{},open{},status{},identity{};HFONT font{};
-    bool busy=false,closing=false;std::future<repair::Json> future;
-    ~Reader(){if(font)DeleteObject(font);}
-    void controls(bool enable){for(auto h:{base,input,open})EnableWindow(h,enable);}
-    void initialize(){
-        HDC dc=GetDC(window);int dpi=GetDeviceCaps(dc,LOGPIXELSX);ReleaseDC(window,dc);
-        font=CreateFontW(-MulDiv(10,dpi,72),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
-        auto item=[&](const wchar_t* kind,const wchar_t* label,DWORD style,int id,int x,int y,int w,int h){auto c=control(window,kind,label,style,id,font);MoveWindow(c,MulDiv(x,dpi,96),MulDiv(y,dpi,96),MulDiv(w,dpi,96),MulDiv(h,dpi,96),TRUE);return c;};
-        item(L"STATIC",L"Сервер:",0,-1,16,22,130,24);
-        base=item(L"EDIT",L"http://127.0.0.1:8080",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,Base,150,16,530,30);
-        auto settings=load_profile("reader.json");if(settings.contains("server")&&settings["server"].is_string())set_text(base,wide(settings["server"].get<std::string>()));
-        item(L"STATIC",L"QR / номер:",0,-1,16,72,130,24);
-        input=item(L"EDIT",L"",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,Input,150,66,530,32);
-        SendMessageW(input,EM_SETLIMITTEXT,1024,0);
-        SendMessageW(input,EM_SETCUEBANNER,TRUE,reinterpret_cast<LPARAM>(L"Сканируйте QR или вставьте ссылку; Enter — открыть"));
-        open=item(L"BUTTON",L"Открыть для просмотра",WS_TABSTOP|BS_DEFPUSHBUTTON,Open,150,114,280,36);
-        identity=item(L"STATIC",L"",0,-1,16,172,664,48);
-        status=item(L"STATIC",L"Ридер открывает только просмотр. USB-сканер работает как клавиатура. На телефоне можно сканировать QR обычной камерой.",0,Status,16,232,664,70);
-        SetWindowSubclass(input,[](HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR parent)->LRESULT{
-            if(m==WM_KEYDOWN&&w==VK_RETURN){PostMessageW(reinterpret_cast<HWND>(parent),WM_COMMAND,Open,0);return 0;}
-            return DefSubclassProc(h,m,w,l);},1,reinterpret_cast<DWORD_PTR>(window));
-        SetTimer(window,1,60,nullptr);
-    }
-    void start(){
-        if(busy)return;auto scan=repair::parse_scan(utf8(text(input)),utf8(text(base)));
-        busy=true;controls(false);set_text(status,L"Проверяем карточку…");
-        try{future=std::async(std::launch::async,[scan]{repair::ApiClient api(scan.base);api.health();auto row=api.card(scan.id);
-            return repair::Json{{"base",scan.base},{"url",scan.url},{"card",row}};});}
-        catch(...){busy=false;controls(true);throw;}
-    }
-    void poll(){
-        if(!busy||!future.valid()||future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
-        try{auto data=future.get();busy=false;if(closing){DestroyWindow(window);return;}
-            auto url=data.at("url").get<std::string>();auto server=data.at("base").get<std::string>();auto card=data.at("card");
-            set_text(base,wide(server));
-            set_text(identity,wide(card.at("product_id").get<std::string>()+" · "+card.at("platform_name").get<std::string>()+" · Внутренний ID: "+std::to_string(card.at("id").get<long long>())));
-            try{save_profile("reader.json",{{"server",server}});}catch(const std::exception&){}
-            if(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",wide(url).c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)throw repair::ApiError("Не удалось открыть браузер.");
-            set_text(status,L"Карточка открыта в браузере только для просмотра. Можно сканировать следующую.");
-            set_text(input,L"");controls(true);SetFocus(input);
-        }catch(const std::exception& e){busy=false;if(closing){DestroyWindow(window);return;}controls(true);set_text(status,wide(e.what()));SetFocus(input);SendMessageW(input,EM_SETSEL,0,-1);}
-    }
+enum Id{Base=100,Input,Open,Toggle};
+struct Scanner{
+ HWND window{},server_label{},base{},input{},open{},status{},identity{};HFONT font{};int dpi=96;
+ bool repair=false,server_visible=true,busy=false,closing=false,connecting=false;std::future<repair::Json> future;
+ ~Scanner(){if(font)DeleteObject(font);}
+ std::string profile()const{return repair?"repair.json":"reader.json";}
+ void controls(bool enabled){EnableWindow(base,enabled&&server_visible);for(auto h:{input,open,server_label})EnableWindow(h,enabled);}
+ void layout(){RECT r{};GetClientRect(window,&r);auto u=[&](int n){return MulDiv(n,dpi,96);};int width=MulDiv(r.right,96,dpi);
+  auto move=[&](HWND h,int x,int y,int w,int height){MoveWindow(h,u(x),u(y),u(w),u(height),TRUE);};
+  move(server_label,18,22,112,24);move(base,140,16,width-158,32);move(input,140,68,width-276,36);move(open,width-120,68,102,36);move(identity,18,130,width-36,54);move(status,18,198,width-36,66);
+ }
+ void show_server(bool show){server_visible=show;ShowWindow(base,show?SW_SHOW:SW_HIDE);EnableWindow(base,show&&!busy);set_text(server_label,show?L"Сервер ▾":L"Сервер ▸");if(show){SetFocus(base);SendMessageW(base,EM_SETSEL,0,-1);}}
+ void initialize(){HDC dc=GetDC(window);dpi=GetDeviceCaps(dc,LOGPIXELSX);ReleaseDC(window,dc);font=theme_font(dpi);
+  server_label=control(window,L"STATIC",L"Сервер ▾",SS_NOTIFY,Toggle,font);
+  base=control(window,L"EDIT",L"http://127.0.0.1:8080",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,Base,font);SendMessageW(base,EM_SETLIMITTEXT,512,0);
+  auto settings=load_profile(profile());if(settings.contains("server")&&settings["server"].is_string())set_text(base,wide(settings["server"].get<std::string>()));
+  control(window,L"STATIC",L"",0,-1,font);
+  auto qr=control(window,L"STATIC",L"QR / номер",0,-1,font);MoveWindow(qr,MulDiv(18,dpi,96),MulDiv(76,dpi,96),MulDiv(112,dpi,96),MulDiv(24,dpi,96),TRUE);
+  input=control(window,L"EDIT",L"",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,Input,font);SendMessageW(input,EM_SETLIMITTEXT,1024,0);
+  SendMessageW(input,EM_SETCUEBANNER,TRUE,reinterpret_cast<LPARAM>(L"Сканируйте QR · Enter — открыть"));
+  open=control(window,L"BUTTON",L"Открыть",WS_TABSTOP,Open,font);identity=control(window,L"STATIC",L"",0,-1,font);
+  status=control(window,L"STATIC",repair?L"Сканируйте QR: бланк откроется в отдельном окне Repair для редактирования и сохранения.":L"Сканируйте QR: бланк откроется в отдельном окне Reader для просмотра.",0,-1,font);
+  layout();show_server(!settings.value("server_confirmed",false));SetTimer(window,1,60,nullptr);apply_app_icon(window);install_update_menu(window);
+ }
+ void start(bool connection=false){if(busy)return;connecting=connection;
+  auto scan=connection?repair::Scan{repair::normalize_server_url(utf8(text(base))),0,{}}:repair::parse_scan(utf8(text(input)),utf8(text(base)));
+  busy=true;controls(false);set_text(status,connection?L"Проверяем адрес сервера…":L"Проверяем карточку…");
+  try{future=std::async(std::launch::async,[scan,connection,editing=repair]{repair::ApiClient api(scan.base);api.health();if(editing&&!api.server_info().contains("capabilities"))throw repair::ApiError("Для Repair обновите сервер до 0.5.0.");return repair::Json{{"base",scan.base},{"url",scan.url},{"card",connection?repair::Json():api.card(scan.id)}};});}catch(...){busy=false;controls(true);throw;}
+ }
+ void poll(){if(!busy||!future.valid()||future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
+  try{auto data=future.get();busy=false;if(closing){DestroyWindow(window);return;}auto server=data.at("base").get<std::string>();set_text(base,wide(server));
+   save_profile(profile(),{{"server",server},{"server_confirmed",true}});controls(true);show_server(false);
+   if(connecting){set_text(status,L"Сервер подключен. Для изменения адреса нажмите «Сервер».");SetFocus(input);return;}
+   auto card=data.at("card");set_text(identity,wide(card.at("product_id").get<std::string>()+" · "+card.at("platform_name").get<std::string>()+" · Unique ID: "+std::to_string(card.at("id").get<long long>())+" · 1C Code: "+card.value("one_c_code",std::string())));
+   auto url=data.at("url").get<std::string>();if(repair)url=server+"/edit/"+std::to_string(card.at("id").get<long long>());
+   if(!open_card_viewer(window,url,repair)){set_text(status,L"Переход к другому бланку отменен. Текущие правки сохранены в окне редактора.");return;}set_text(status,repair?L"Бланк открыт в Repair. Сохранение — кнопкой в бланке или Ctrl+S.":L"Бланк открыт для просмотра. Можно сканировать следующий номер.");set_text(input,L"");SetFocus(input);
+  }catch(const std::exception& e){busy=false;if(closing){DestroyWindow(window);return;}controls(true);set_text(status,wide(e.what()));if(connecting)show_server(true);else{SetFocus(input);SendMessageW(input,EM_SETSEL,0,-1);}}
+ }
 };
 LRESULT CALLBACK procedure(HWND window,UINT m,WPARAM w,LPARAM l){
-    auto* app=reinterpret_cast<Reader*>(GetWindowLongPtrW(window,GWLP_USERDATA));
-    if(m==WM_NCCREATE){app=static_cast<Reader*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);app->window=window;SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));}
-    if(!app)return DefWindowProcW(window,m,w,l);
-    try{switch(m){case WM_CREATE:app->initialize();return 0;case WM_COMMAND:if(LOWORD(w)==Open)app->start();return 0;
-        case WM_TIMER:app->poll();return 0;case WM_CLOSE:if(app->busy){app->closing=true;set_text(app->status,L"Завершаем запрос…");}else DestroyWindow(window);return 0;
-        case WM_DESTROY:KillTimer(window,1);PostQuitMessage(0);return 0;}}
-    catch(const std::exception& e){if(m==WM_CREATE)return -1;set_text(app->status,wide(e.what()));}
-    return DefWindowProcW(window,m,w,l);
+ auto* app=reinterpret_cast<Scanner*>(GetWindowLongPtrW(window,GWLP_USERDATA));if(m==WM_NCCREATE){app=static_cast<Scanner*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);app->window=window;SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));}if(!app)return DefWindowProcW(window,m,w,l);
+ LRESULT themed;if(theme_message(window,m,w,l,themed))return themed;
+ try{switch(m){case WM_CREATE:app->initialize();return 0;case WM_SIZE:app->layout();return 0;case WM_GETMINMAXINFO:{auto* size=reinterpret_cast<MINMAXINFO*>(l);size->ptMinTrackSize={MulDiv(680,app->dpi,96),MulDiv(325,app->dpi,96)};return 0;}
+  case WM_COMMAND:if(LOWORD(w)==Open)app->start();else if(LOWORD(w)==Toggle&&HIWORD(w)==STN_CLICKED&&!app->busy)app->show_server(!app->server_visible);return 0;
+  case WM_TIMER:app->poll();return 0;case WM_CLOSE:if(!close_card_viewers(window))return 0;if(app->busy){app->closing=true;set_text(app->status,L"Завершаем запрос…");}else DestroyWindow(window);return 0;
+  case WM_DESTROY:KillTimer(window,1);PostQuitMessage(0);return 0;}}
+ catch(const std::exception& e){if(m==WM_CREATE)return -1;set_text(app->status,wide(e.what()));}return DefWindowProcW(window,m,w,l);
 }
 }
-int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
-    SetProcessDPIAware();INITCOMMONCONTROLSEX cc{sizeof(cc),ICC_STANDARD_CLASSES};InitCommonControlsEx(&cc);
-    WNDCLASSW cls{};cls.hInstance=instance;cls.lpfnWndProc=procedure;cls.lpszClassName=L"RepairReader";cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
-    if(!RegisterClassW(&cls))return 1;Reader app;HDC dc=GetDC(nullptr);int dpi=GetDeviceCaps(dc,LOGPIXELSX);ReleaseDC(nullptr,dc);
-    auto window=CreateWindowExW(0,cls.lpszClassName,L"Ридер — просмотр карточек",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
-        CW_USEDEFAULT,CW_USEDEFAULT,MulDiv(720,dpi,96),MulDiv(365,dpi,96),nullptr,nullptr,instance,&app);
-    if(!window){MessageBoxW(nullptr,L"Не удалось открыть Ридер.",L"Ридер",MB_OK|MB_ICONERROR);return 1;}
-    ShowWindow(window,show);UpdateWindow(window);SetFocus(app.input);
-    int argc=0;auto args=CommandLineToArgvW(GetCommandLineW(),&argc);
-    if(args){if(argc==2){set_text(app.input,args[1]);PostMessageW(window,WM_COMMAND,Open,0);}LocalFree(args);}
-    MSG msg{};int result;while((result=static_cast<int>(GetMessageW(&msg,nullptr,0,0)))>0){if(!IsDialogMessageW(window,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
-    return result<0?1:static_cast<int>(msg.wParam);
+int run_scanner(HINSTANCE instance,int show,bool repair){
+ SetProcessDPIAware();INITCOMMONCONTROLSEX cc{sizeof(cc),ICC_STANDARD_CLASSES};InitCommonControlsEx(&cc);
+ WNDCLASSW cls{};cls.hInstance=instance;cls.lpfnWndProc=procedure;cls.lpszClassName=repair?L"RepairEditorClient":L"RepairReader";cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hbrBackground=theme_background();cls.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101));if(!RegisterClassW(&cls))return 1;
+ Scanner app;app.repair=repair;HDC dc=GetDC(nullptr);int dpi=GetDeviceCaps(dc,LOGPIXELSX);ReleaseDC(nullptr,dc);
+ auto window=CreateWindowExW(0,cls.lpszClassName,repair?L"Repair":L"Reader",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,MulDiv(740,dpi,96),MulDiv(340,dpi,96),nullptr,nullptr,instance,&app);
+ if(!window){MessageBoxW(nullptr,L"Не удалось открыть приложение.",repair?L"Repair":L"Reader",MB_OK|MB_ICONERROR);return 1;}ShowWindow(window,show);UpdateWindow(window);SetFocus(app.input);
+ int argc=0;auto args=CommandLineToArgvW(GetCommandLineW(),&argc);if(args){if(argc==2){set_text(app.input,args[1]);PostMessageW(window,WM_COMMAND,Open,0);}LocalFree(args);}
+ MSG msg{};int result;while((result=static_cast<int>(GetMessageW(&msg,nullptr,0,0)))>0){
+  if(msg.message==WM_KEYDOWN&&msg.wParam==VK_RETURN&&(msg.hwnd==app.input||msg.hwnd==app.base)){try{app.start(msg.hwnd==app.base);}catch(const std::exception& e){set_text(app.status,wide(e.what()));}continue;}
+  if(!IsDialogMessageW(window,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}
+ }return result<0?1:static_cast<int>(msg.wParam);
 }

@@ -1,0 +1,57 @@
+name: Repair Cards Windows
+on:
+  push:
+    branches: [repair-cards-stage1]
+    paths:
+      - 'repair-cards-stage1/src/**'
+      - 'repair-cards-stage1/tests/**'
+      - 'repair-cards-stage1/scripts/ci_windows_smoke.ps1'
+      - 'repair-cards-stage1/CMakeLists.txt'
+      - 'repair-cards-stage1/third_party/**'
+      - 'repair-cards-stage1/resources/**'
+      - 'repair-cards-stage1/web/**'
+      - '.github/workflows/repair-cards-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mingw-and-embedded-view:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - name: Build Windows clients and server with GCC
+        shell: msys2 {0}
+        run: |
+          cmake -S repair-cards-stage1 -B windows-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build windows-build --parallel 2
+          ctest --test-dir windows-build --output-on-failure
+      - name: Ensure WebView2 Runtime
+        shell: pwsh
+        run: |
+          $roots = @("${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application", "$env:LOCALAPPDATA\Microsoft\EdgeWebView\Application")
+          $found = @($roots | ForEach-Object { Get-ChildItem $_ -Filter msedgewebview2.exe -Recurse -ErrorAction SilentlyContinue })
+          if (!$found.Count) {
+            $setup = Join-Path $env:TEMP 'WebView2Setup.exe'
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup
+            $process = Start-Process $setup -ArgumentList '/silent /install' -Wait -PassThru
+            Write-Output "WebView2 installer exit code: $($process.ExitCode)"
+          }
+      - name: Native windows and embedded Reader/Repair smoke
+        shell: pwsh
+        run: ./repair-cards-stage1/scripts/ci_windows_smoke.ps1 -BuildDir ./windows-build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repair-cards-windows-test-report
+          path: |
+            windows-build/Testing/Temporary/LastTest.log
+            ~/AppData/Local/RepairCards/viewer-diagnostic.json

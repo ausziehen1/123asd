@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
         auto configured_url=config.value("public_url",std::string());
         if(!configured_url.empty())store.set_setting("public_url",repair::normalize_public_url(configured_url),true);
         const bool local_only=host=="127.0.0.1"||host=="localhost"||host=="::1";
-        auto server_info=[&]{return json{{"version","0.4.1"},{"server_id",store.setting("server_id")},
+        auto server_info=[&]{return json{{"version","0.5.0"},{"capabilities",json::array({"one_c_v1","embedded_view_v1"})},{"server_id",store.setting("server_id")},
             {"public_url",store.setting("public_url")},{"local_only",local_only},{"listen_host",host},{"port",port},
             {"suggested_urls",network_urls(port)}};};
         httplib::Server server;
@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
             res.set_content(read_file(web_root / "assets" / name), type);
         }));
         server.Get("/api/health", safe([&](const auto&, auto& res) {
-            send(res, {{"status", "ok"}, {"version", "0.4.1"}, {"sqlite", sqlite3_libversion()}});
+            send(res, {{"status", "ok"}, {"version", "0.5.0"}, {"sqlite", sqlite3_libversion()}});
         }));
         server.Get("/api/server-info",safe([&](const auto&,auto& res){send(res,server_info());}));
         server.Post("/api/labels/cards",safe([&](const auto& req,auto& res){
@@ -170,6 +170,7 @@ int main(int argc, char** argv) {
             for(const auto& value:list){json wrapped={{"id",value}};ids.push_back(integer_field(wrapped,"id"));}
             send(res,store.card_set(ids));
         }));
+        server.Post("/api/labels/assign",safe([&](const auto& req,auto& res){auto body=json::parse(req.body);send(res,store.assign_codes(body.at("cards"),body.at("groups")));}));
         server.Put("/api/settings/public-url",safe([&](const auto& req,auto& res){
             if(local_only)throw InputError("Для доступа по сети установите host = 0.0.0.0 в конфиге и перезапустите сервер.");
             auto body=json::parse(req.body);
@@ -233,13 +234,13 @@ int main(int argc, char** argv) {
                         escape(p.at("name").template get<std::string>()) + "</option>";
             }
             html += "</select></label> <button>Показать</button></form><div class='scroll'><table>"
-                    "<tr><th>Внутренний ID</th><th>ID продукции</th><th>Тип платформы</th><th>Бланк</th></tr>";
+                    "<tr><th>Unique ID</th><th>Table ID</th><th>Тип платформы</th><th>1C Code</th><th>Бланк</th></tr>";
             auto rows = store.cards(platform, 100, after);
             for (const auto& c : rows) {
                 auto id = std::to_string(c.at("id").template get<long long>());
                 html += "<tr><td>" + id + "</td><td>" + escape(c.at("product_id").template get<std::string>()) +
                         "</td><td>" + escape(c.at("platform_name").template get<std::string>()) +
-                        "</td><td><a href='/cards/" + id + "'>Открыть</a></td></tr>";
+                        "</td><td>" + escape(c.at("one_c_code").template get<std::string>()) + "</td><td><a href='/cards/" + id + "'>Открыть</a></td></tr>";
             }
             html += "</table></div>";
             if (rows.empty()) html += "<p>Записей пока нет. Для регистрации партии запустите repair_creator.</p>";
@@ -266,7 +267,7 @@ int main(int argc, char** argv) {
             if (res.body.empty()) send(res, {{"error", "Route not found"}}, res.status);
         });
         if(!server.bind_to_port(host,port))throw std::runtime_error("Cannot listen on configured host/port");
-        std::cout << "Repair Cards 0.4.1\nDatabase: " << database.u8string()
+        std::cout << "Repair Cards 0.5.0\nDatabase: " << database.u8string()
                   << "\nListen: http://" << host << ':' << port << "\nStop: Ctrl+C\n" << std::flush;
         if(host=="0.0.0.0")std::cout<<"Local browser: http://127.0.0.1:"<<port<<"\nQR address is configured in Creator.\n"<<std::flush;
         if (!server.listen_after_bind()) throw std::runtime_error("Server stopped unexpectedly");

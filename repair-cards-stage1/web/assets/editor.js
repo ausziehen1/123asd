@@ -3,15 +3,24 @@
   const root = document.body;
   const id = root.dataset.cardId;
   const editable = root.dataset.mode === 'edit';
+  const embedded = new URLSearchParams(location.search).get('embedded') === '1';
+  if(embedded)root.classList.add('embedded');
+  function notify(type, extra={}) { if(window.chrome && window.chrome.webview) window.chrome.webview.postMessage({type,...extra}); }
+
   const status = document.getElementById('state');
   const saveButton = document.getElementById('save');
   const sheetSelect = document.getElementById('sheet-select');
+  let cardInfo=null;
+  function renderIdentity(){if(cardInfo)document.getElementById('identity').textContent=`Тип платформы: ${cardInfo.platform_name} · Unique ID: ${cardInfo.id} · 1C Code: ${cardInfo.one_c_code || '—'}`;}
   let spreadsheet, revision = 0, savedSnapshot = '', dirty = false, saving = false, loaded = false;
   const adaptedSheets = new WeakSet();
   const clone = value => JSON.parse(JSON.stringify(value));
   function message(value, kind = '') { status.textContent = value; status.className = kind; }
   async function request(path, options) {
-    const response = await fetch(path, {cache:'no-store', ...options});
+    const abort=new AbortController();const timeout=setTimeout(()=>abort.abort(),20000);let response;
+    try{response=await fetch(path,{cache:'no-store',...options,signal:abort.signal});}
+    catch(error){if(error.name==='AbortError')throw new TypeError('Сервер не ответил за 20 секунд.');throw error;}
+    finally{clearTimeout(timeout);}
     let data;
     try { data = await response.json(); } catch { throw new Error('Сервер вернул некорректный ответ.'); }
     if (!response.ok) {
@@ -95,9 +104,10 @@
         const cell = row.getCell(c);
         if (cell.isMerged && cell.master.address !== cell.address) continue;
         let value = cellText(cell);
+        if (fillIdentity && /^\s*Код 1[СC]\s*:/.test(value)) value = 'Код 1С: ' + (card.one_c_code || '');
         if (fillIdentity && /^#ID/.test(value.trim())) value = '#ID ' + card.product_id;
         if (fillIdentity && /^\s*Наименование товара:/.test(value)) value = 'Наименование товара: ' + card.platform_name;
-        if (value !== '' || Object.keys(cell.style || {}).length) out.cells[c - 1] = {text:value, style:styleIndex(styleFromExcel(cell))};
+        if (value !== '' || Object.keys(cell.style || {}).length) out.cells[c - 1] = {text:value, style:styleIndex(styleFromExcel(cell)),...(/^\s*Код 1[СC]\s*:/.test(value)?{repairField:'one_c_code'}:{})};
       }
       sheet.rows[r - 1] = out;
     }
@@ -159,6 +169,7 @@
         for (const [c, cell] of Object.entries(row.cells || {})) {
           const out = target.getCell(Number(c)+1), value = cell.text === undefined || cell.text === null ? '' : String(cell.text);
           out.value = value.startsWith('=') ? {formula:value.slice(1)} : value;
+          if(cell.repairField==='one_c_code')book.definedNames.add("'"+ws.name.replace(/'/g,"''")+"'!$"+address(Number(key),Number(c)).replace(/(\d+)$/, '$$$1'), 'RepairCards_OneCCode');
           out.style = toExcelStyle((data.styles || [])[cell.style]);
         }
       }
@@ -202,7 +213,7 @@
     prepareSheets();
     const changed = snapshot() !== savedSnapshot;
     if (changed && !dirty) message('Есть несохраненные изменения. Нажмите «Сохранить».', 'dirty');
-    dirty = changed; saveButton.disabled = !dirty;
+    dirty = changed; saveButton.disabled = !dirty; notify('state',{dirty,saving});
   }
   async function save() {
     if (!editable || saving || !loaded) return;
@@ -214,19 +225,20 @@
     try {
       const bytes = await workbookBytes(documentState);
       const result = await request(`/api/cards/${id}/document`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision,document:documentState,workbook_base64:base64(bytes)})});
-      revision = result.revision; savedSnapshot = state;
+      revision = result.revision; savedSnapshot = state; if(cardInfo && typeof result.one_c_code==='string'){cardInfo.one_c_code=result.one_c_code;renderIdentity();}
       dirty = snapshot() !== state;
       message(dirty ? 'Бланк сохранен. Есть новые несохраненные правки.' : 'Бланк сохранен.', dirty ? 'dirty' : '');
     } catch (error) {
       dirty = true;
       message(error instanceof TypeError ? 'Нет ответа сервера. Правки остаются в этом окне. Сохранение могло завершиться — проверьте сохраненную версию перед повтором.' : error.message, 'error');
-    } finally { saving = false; saveButton.disabled = !dirty; }
+    } finally { saving = false; saveButton.disabled = !dirty; notify('state',{dirty,saving}); }
+    return !dirty;
   }
   async function start() {
     try {
       const [card, stored] = await Promise.all([request(`/api/cards/${id}`), request(`/api/cards/${id}/document`)]);
       document.getElementById('title').textContent = (editable ? 'Редактирование: ' : 'Просмотр: ') + card.product_id;
-      document.getElementById('identity').textContent = `Тип платформы: ${card.platform_name} · Внутренний ID: ${card.id}`;
+      cardInfo=card;renderIdentity();
       let state = stored.document; revision = stored.revision;
       if (!state) {
         message('Загружаем Excel-шаблон…');
@@ -265,9 +277,15 @@
         state.sheets.forEach((sheet,index)=>{const option=document.createElement('option');option.value=String(index);option.textContent=sheet.name;sheetSelect.appendChild(option);});
         sheetSelect.addEventListener('change',()=>spreadsheet.sheet.resetData(spreadsheet.datas[Number(sheetSelect.value)]));
       } else sheetSelect.parentElement.hidden = true;
-      savedSnapshot = snapshot(); loaded = true;
+      savedSnapshot = snapshot(); loaded = true; notify('state',{dirty:false,saving:false});
       spreadsheet.change(checkDirty);
       spreadsheet.on('cell-edited', checkDirty);
+      if(embedded){
+        const data=state.sheets[0];let lastRow=0,lastCol=0;
+        for(const [r,row] of Object.entries(data.rows))if(r!=='len')for(const [c,cell] of Object.entries(row.cells||{}))if(cell.text || cell.style!==undefined || cell.merge){lastRow=Math.max(lastRow,Number(r)+(cell.merge?.[0]||0));lastCol=Math.max(lastCol,Number(c)+(cell.merge?.[1]||0));}
+        let width=70,height=editable?180:140;for(let c=0;c<=lastCol;c++)width+=(data.cols[c]?.width||64);for(let r=0;r<=lastRow;r++)height+=(data.rows[r]?.height||20);
+        notify('ready',{title:card.product_id,mode:editable?'edit':'read',width:Math.ceil(width),height:Math.ceil(height)});
+      }
       message(editable ? 'Бланк открыт. Правки сохраняются кнопкой «Сохранить».' : 'Бланк открыт только для просмотра.');
       if (editable) {
         setInterval(checkDirty, 500);
@@ -290,5 +308,7 @@
   });
   document.addEventListener('keydown',event=>{if(editable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='s'){event.preventDefault();event.stopPropagation();save();}},true);
   window.addEventListener('beforeunload',event=>{if(editable && loaded && (dirty || saving || snapshot()!==savedSnapshot)){event.preventDefault();event.returnValue='';}});
+  window.repairSaveAndClose=async()=>{ const ok=await save();notify('save-close',{ok:!!ok}); };
+  document.addEventListener('input',()=>{if(editable&&loaded)notify('state',{dirty:true,saving});});
   start();
 })();

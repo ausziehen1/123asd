@@ -50,6 +50,7 @@ Json ApiClient::health() const {
         throw ApiError("По этому адресу не найден работающий сервер карточек.");
     return data;
 }
+Json ApiClient::assign_codes(const Json& cards,const Json& groups) const {Json body={{"cards",cards},{"groups",groups}};try{return request("/api/labels/assign",&body,true);}catch(const RegistrationUncertain&){throw ApiError("Ответ на распределение кодов 1С не получен. Изменения могли сохраниться. Закройте окно подготовки QR и откройте выбранные карточки заново перед повтором.");}}
 Json ApiClient::platforms() const { return request("/api/platforms"); }
 Json ApiClient::server_info() const { return request("/api/server-info"); }
 Json ApiClient::card(long long id) const { return request("/api/cards/"+std::to_string(id)); }

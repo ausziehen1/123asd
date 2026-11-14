@@ -5,6 +5,7 @@
 #include "labels.h"
 #include "label_dialog_win.h"
 #include "win_support.h"
+#include "viewer_win.h"
 #include <chrono>
 #include <functional>
 #include <future>
@@ -42,7 +43,7 @@ HWND control(HWND parent, const wchar_t* kind, const wchar_t* label, DWORD style
     HWND result = CreateWindowExW(0, kind, label, WS_CHILD | WS_VISIBLE | style,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
     if (!result) throw std::runtime_error("Cannot create a Windows control");
-    SendMessageW(result, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    style_control(result);SendMessageW(result, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     return result;
 }
 struct NamePrompt {
@@ -62,6 +63,7 @@ LRESULT CALLBACK prompt_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(p));
     }
     if (!p) return DefWindowProcW(window, message, wp, lp);
+    LRESULT themed;if(theme_message(window,message,wp,lp,themed))return themed;
     auto unit = [p](int value) { return MulDiv(value, p->scale, 96); };
     if (message == WM_CREATE) {
         auto label = control(window, L"STATIC", p->label.c_str(), 0, -1, p->font);
@@ -156,8 +158,7 @@ public:
     }
     void initialize() {
         HDC screen = GetDC(window); dpi = GetDeviceCaps(screen, LOGPIXELSX); ReleaseDC(window, screen);
-        font = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        font=theme_font(dpi);
         server_label = control(window, L"STATIC", L"Сервер:", 0, -1, font);
         server = control(window, L"EDIT", L"http://127.0.0.1:8080", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, Server, font);
         preferences=repair::win::load_profile("creator.json");
@@ -169,20 +170,20 @@ public:
         platform_label = control(window, L"STATIC", L"Тип платформы:", 0, -1, font);
         platform = control(window, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, Platform, font);
         add = control(window, L"BUTTON", L"+", WS_TABSTOP, Add, font);
-        first_label = control(window, L"STATIC", L"Начальный ID:", 0, -1, font);
+        first_label = control(window, L"STATIC", L"Начальный Table ID:", 0, -1, font);
         first = control(window, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, First, font);
         SendMessageW(first, EM_SETLIMITTEXT, 128, 0);
         count_label = control(window, L"STATIC", L"Количество:", 0, -1, font);
         count = control(window, L"EDIT", L"1", WS_BORDER | WS_TABSTOP | ES_NUMBER, Count, font);
         SendMessageW(count, EM_SETLIMITTEXT, 4, 0);
-        preview = control(window, L"BUTTON", L"Проверить диапазон", WS_TABSTOP, Preview, font);
-        create = control(window, L"BUTTON", L"Создать партию", WS_TABSTOP | BS_DEFPUSHBUTTON, Register, font);
+        preview = control(window, L"BUTTON", L"Просмотр", WS_TABSTOP, Preview, font);
+        create = control(window, L"BUTTON", L"Сформировать диапазон", WS_TABSTOP | BS_DEFPUSHBUTTON, Register, font);
         range = control(window, L"STATIC", L"", 0, -1, font);
         list_label = control(window, L"STATIC", L"Карточки: Ctrl / Shift — выбор нескольких для QR", 0, -1, font);
         list = control(window, WC_LISTVIEWW, L"", WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS, List, font);
-        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
-        const wchar_t* names[] = {L"Внутренний ID", L"ID продукции", L"Тип платформы"};
-        for (int i = 0; i < 3; ++i) {
+        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        const wchar_t* names[] = {L"Unique ID", L"Table ID", L"Тип платформы", L"1C Code"};
+        for (int i = 0; i < 4; ++i) {
             LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH;
             column.pszText = const_cast<wchar_t*>(names[i]); column.cx = unit(i == 0 ? 140 : 220);
             ListView_InsertColumn(list, i, &column);
@@ -212,7 +213,7 @@ public:
         move(create, 160, 162, 230, 34); move(range, 406, 165, w - 422, 48);
         move(list_label, 16, 220, w - 32, 24);
         move(list, 16, 250, w - 32, h - 382);
-        ListView_SetColumnWidth(list, 2, unit(w - 414));
+        ListView_SetColumnWidth(list, 2, unit(w - 554));ListView_SetColumnWidth(list,3,unit(140));
         move(open, 16, h - 116, 150, 32); move(refresh, 178, h - 116, 100, 32);
         move(labels_button,290,h-116,150,32);move(batch_button,452,h-116,165,32);
         move(previous, w - 272, h - 116, 100, 32); move(next, w - 160, h - 116, 144, 32);
@@ -254,6 +255,7 @@ public:
             auto name = wide(card.at("platform_name").get<std::string>());
             ListView_SetItemText(list, static_cast<int>(i), 1, product.data());
             ListView_SetItemText(list, static_cast<int>(i), 2, name.data());
+            auto code=wide(card.value("one_c_code",std::string()));ListView_SetItemText(list,static_cast<int>(i),3,code.data());
         }
         set_text(status, L"Подключено. Показано карточек: " + std::to_wstring(cards.size()) + L".");
         enable_controls();
@@ -303,16 +305,14 @@ public:
         if(ListView_GetSelectedCount(list)!=1)throw repair::ApiError("Для редактирования выберите одну карточку.");
         auto url = base(); int index = ListView_GetNextItem(list, -1, LVNI_SELECTED);
         if (index < 0) return;
-        auto link = wide(url + "/edit/" + std::to_string(cards.at(index).at("id").get<long long>()));
-        auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", link.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-        if (result <= 32) throw repair::ApiError("Не удалось открыть браузер.");
+        open_card_viewer(window,url+"/edit/"+std::to_string(cards.at(index).at("id").get<long long>()),true);
     }
     void command(int id, int event) {
         if (busy) return;
         if (id == Connect) {
             auto url = repair::normalize_server_url(utf8(text(server)));
             start(Job::Connect, [url] {
-                repair::ApiClient api(url); api.health();
+                repair::ApiClient api(url); api.health();auto info=api.server_info();if(!info.contains("capabilities"))throw repair::ApiError("Обновите сервер до версии 0.5.0 перед запуском этого Creator.");
                 return Json{{"base", url}, {"platforms", api.platforms()}, {"cards", api.cards(0)}, {"info",api.server_info()}};
             });
         } else if (id == Add) {
@@ -331,7 +331,7 @@ public:
             if(id==LastLabels){if(last_batch_server!=server_id)throw repair::ApiError("Последняя партия относится к другой базе.");selected=last_batch;}
             else{int index=-1;while((index=ListView_GetNextItem(list,index,LVNI_SELECTED))>=0)selected.push_back(cards.at(index));}
             if(selected.empty())throw repair::ApiError("Выберите карточки для QR.");
-            start(Job::Labels,[url,selected]{return Json{{"info",repair::ApiClient(url).server_info()},{"cards",selected}};});
+            start(Job::Labels,[url,selected]{Json ids=Json::array();for(const auto& row:selected)ids.push_back(row.at("id"));return Json{{"info",repair::ApiClient(url).server_info()},{"cards",repair::ApiClient(url).resolve_cards(ids)}};});
         } else if(id==ScanInput){
             auto url=base();auto input=ask_platform(window,font,dpi,true);if(input.empty())return;
             auto scan=repair::parse_scan(utf8(input),url);auto expected=server_id;
@@ -398,11 +398,9 @@ public:
             MessageBoxW(window, message.c_str(), L"Партия сохранена", MB_OK | MB_ICONINFORMATION);
             load_cards(0);
         } else if(kind==Job::Labels){
-            show_label_dialog(window,base(),result.at("cards"),result.at("info"));
+            show_label_dialog(window,base(),result.at("cards"),result.at("info"));load_cards(0);
         } else if(kind==Job::Scan){
-            auto link=wide(base()+"/edit/"+std::to_string(result.at("id").get<long long>()));
-            if(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",link.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
-                throw repair::ApiError("Не удалось открыть редактор.");
+            open_card_viewer(window,base()+"/edit/"+std::to_string(result.at("id").get<long long>()),true);
         }
     }
     void poll() {
@@ -431,6 +429,7 @@ LRESULT CALLBACK app_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
         app->window = window; SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
     }
     if (!app) return DefWindowProcW(window, message, wp, lp);
+    LRESULT themed;if(theme_message(window,message,wp,lp,themed))return themed;
     try {
         switch (message) {
         case WM_CREATE: app->initialize(); return 0;
@@ -452,6 +451,7 @@ LRESULT CALLBACK app_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_CLOSE:
+            if(!close_card_viewers(window))return 0;
             if (app->busy) {
                 app->closing = true;
                 set_text(app->status, L"Завершаем текущий запрос и закрываем окно…");
@@ -468,23 +468,23 @@ LRESULT CALLBACK app_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
 }
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+int run_creator(HINSTANCE instance,int show) {
     SetProcessDPIAware();
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&controls);
     WNDCLASSW main_class{}; main_class.lpfnWndProc = app_proc; main_class.hInstance = instance;
     main_class.lpszClassName = L"RepairCreator"; main_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    main_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    main_class.hbrBackground=theme_background();main_class.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101));
     if (!RegisterClassW(&main_class)) return 1;
     auto prompt_class = main_class; prompt_class.lpfnWndProc = prompt_proc; prompt_class.lpszClassName = L"RepairPlatformPrompt";
     if (!RegisterClassW(&prompt_class)) return 1;
     App app;
     HDC dc = GetDC(nullptr); int dpi = GetDeviceCaps(dc, LOGPIXELSX); ReleaseDC(nullptr, dc);
-    HWND window = CreateWindowExW(0, L"RepairCreator", L"Креатор — Карточки ремонта 0.4.1",
+    HWND window = CreateWindowExW(0, L"RepairCreator", L"Creator",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1050, dpi, 96), MulDiv(730, dpi, 96),
         nullptr, nullptr, instance, &app);
     if (!window) { MessageBoxW(nullptr, L"Не удалось открыть окно Креатора.", L"Креатор", MB_OK | MB_ICONERROR); return 1; }
-    ShowWindow(window, show); UpdateWindow(window);
+    apply_app_icon(window);install_update_menu(window);ShowWindow(window, show); UpdateWindow(window);
     MSG message{};
     int result;
     while ((result = static_cast<int>(GetMessageW(&message, nullptr, 0, 0))) > 0) {

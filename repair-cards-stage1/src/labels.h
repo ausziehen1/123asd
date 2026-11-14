@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace repair {
-struct Label { long long id; std::string product_id, platform, url; };
+struct Label { long long id; std::string product_id, platform, url, one_c_code; };
 struct Scan { std::string base; long long id; std::string url; };
 std::string normalize_public_url(const std::string& url);
 std::string card_url(const std::string& base, long long id);

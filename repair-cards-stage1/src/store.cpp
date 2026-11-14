@@ -1,6 +1,8 @@
 #include "store.h"
 #include "sequence.h"
 #include "document.h"
+#include "one_c.h"
+#include <set>
 #include <limits>
 #include <memory>
 
@@ -42,12 +44,13 @@ public:
     long long int_at(int i) const { return sqlite3_column_int64(value, i); }
 };
 const char* card_select =
-    "SELECT c.id,c.product_id,c.platform_type_id,p.name,c.created_at "
+    "SELECT c.id,c.product_id,c.platform_type_id,p.name,c.created_at,c.one_c_code,c.document_revision "
     "FROM cards c JOIN platform_types p ON p.id=c.platform_type_id ";
 json read_card(const Statement& q) {
     auto id = q.int_at(0);
     return {{"id", id}, {"product_id", q.text_at(1)}, {"platform_type_id", q.int_at(2)},
             {"platform_name", q.text_at(3)}, {"created_at", q.text_at(4)},
+            {"one_c_code",q.text_at(5)},{"document_revision",q.int_at(6)},
             {"view_path", "/cards/" + std::to_string(id)}};
 }
 }
@@ -64,7 +67,7 @@ Store::Store(const std::string& filename) {
         exec(db_, "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
         long long v = 0;
         { Statement version(db_, "PRAGMA user_version"); version.step(); v = version.int_at(0); }
-        if (v > 3) throw std::runtime_error("Database belongs to a newer application version");
+        if (v > 4) throw std::runtime_error("Database belongs to a newer application version");
         if (v == 0) {
             exec(db_,
                 "BEGIN IMMEDIATE;"
@@ -88,6 +91,18 @@ Store::Store(const std::string& filename) {
                 "PRAGMA user_version=2; COMMIT;");
         }
         if(v<3)exec(db_,"BEGIN IMMEDIATE;CREATE TABLE app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);PRAGMA user_version=3;COMMIT;");
+        if(v<4){
+            exec(db_,"BEGIN IMMEDIATE;ALTER TABLE cards ADD COLUMN one_c_code TEXT NOT NULL DEFAULT '';");
+            Statement rows(db_,"SELECT id,document_json,workbook FROM cards");
+            while(rows.step()){
+                std::optional<std::string> code;auto raw=rows.text_at(1);auto document=raw.empty()?json():json::parse(raw);
+                if(!document.is_null())code=document_one_c(document);
+                if(!code){auto p=static_cast<const char*>(sqlite3_column_blob(rows.value,2));auto n=sqlite3_column_bytes(rows.value,2);try{code=workbook_one_c(std::string(p?p:"",n));}catch(const InputError&){} }
+                Statement update(db_,"UPDATE cards SET one_c_code=?,document_json=? WHERE id=?");update.text(1,code.value_or(""));
+                if(document.is_null())sqlite3_bind_null(update.value,2);else update.text(2,document.dump());update.integer(3,rows.int_at(0));update.step();
+            }
+            exec(db_,"PRAGMA user_version=4;COMMIT;");
+        }
     } catch (...) { sqlite3_close(db_); db_ = nullptr; throw; }
 }
 Store::~Store() { sqlite3_close(db_); }
@@ -127,6 +142,7 @@ json Store::create_batch(long long platform, const std::string& first, int count
                          const std::string& workbook) {
     auto ids = make_sequence(first, count);
     if (workbook.empty()) throw InputError("Workbook template is empty");
+    std::string initialCode;try{initialCode=workbook_one_c(workbook).value_or("");}catch(const InputError&){}
     std::lock_guard<std::mutex> guard(mutex_);
     exec(db_, "BEGIN IMMEDIATE");
     try {
@@ -137,8 +153,8 @@ json Store::create_batch(long long platform, const std::string& first, int count
         }
         json records = json::array();
         for (const auto& product : ids) {
-            Statement insert(db_, "INSERT INTO cards(product_id,platform_type_id,workbook) VALUES(?,?,?)");
-            insert.text(1, product); insert.integer(2, platform); insert.blob(3, workbook); insert.step();
+            Statement insert(db_, "INSERT INTO cards(product_id,platform_type_id,workbook,one_c_code) VALUES(?,?,?,?)");
+            insert.text(1, product); insert.integer(2, platform); insert.blob(3, workbook); insert.text(4,initialCode);insert.step();
             auto id = sqlite3_last_insert_rowid(db_);
             records.push_back({{"id", id}, {"product_id", product},
                                {"view_path", "/cards/" + std::to_string(id)}});
@@ -205,24 +221,57 @@ json Store::save_document(long long id, long long expected_revision, const json&
     validate_document(document);
     if (workbook.size() < 4 || workbook.size() > 10 * 1024 * 1024 || workbook.substr(0, 4) != std::string("PK\x03\x04", 4))
         throw InputError("Workbook must be an XLSX ZIP file");
-    auto raw = document.dump();
+    auto normalized=document;auto code=document_one_c(normalized);
+    auto raw=normalized.dump();
+    auto bytes=code?set_workbook_one_c(workbook,*code):workbook;
     std::lock_guard<std::mutex> guard(mutex_);
     exec(db_, "BEGIN IMMEDIATE");
     try {
-        Statement exists(db_, "SELECT document_revision FROM cards WHERE id=?");
+        Statement exists(db_, "SELECT document_revision,one_c_code FROM cards WHERE id=?");
         exists.integer(1, id);
         if (!exists.step()) throw NotFound("Card not found");
+        if(!code&&!exists.text_at(1).empty())throw InputError("В бланке удалено поле «Код 1С». Восстановите его или сначала очистите значение в привязанной ячейке.");
         if (exists.int_at(0) != expected_revision)
             throw RevisionConflict("Document was changed by another editor. Reload the saved version before saving.");
         Statement update(db_, "UPDATE cards SET document_json=?,workbook=?,document_revision=document_revision+1,"
-                              "document_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND document_revision=?");
-        update.text(1, raw); update.blob(2, workbook); update.integer(3, id); update.integer(4, expected_revision);
+                              "document_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),one_c_code=COALESCE(?,one_c_code) WHERE id=? AND document_revision=?");
+        update.text(1,raw);update.blob(2,bytes);if(code)update.text(3,*code);else sqlite3_bind_null(update.value,3);update.integer(4,id);update.integer(5,expected_revision);
         update.step();
         if (sqlite3_changes(db_) != 1) throw RevisionConflict("Document revision changed");
-        Statement q(db_, "SELECT document_revision,document_updated_at FROM cards WHERE id=?");
+        Statement q(db_, "SELECT document_revision,document_updated_at,one_c_code FROM cards WHERE id=?");
         q.integer(1, id); q.step();
-        json result = {{"revision", q.int_at(0)}, {"updated_at", q.text_at(1)}};
+        json result = {{"revision", q.int_at(0)}, {"updated_at", q.text_at(1)},{"one_c_code",q.text_at(2)}};
         exec(db_, "COMMIT");
         return result;
     } catch (...) { sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+}
+
+json Store::assign_codes(const json& cards,const json& groups){
+    if(!cards.is_array()||cards.empty()||cards.size()>1000||!groups.is_array()||groups.empty()||groups.size()>1000)throw InputError("Выберите 1–1000 карточек и задайте группы кодов 1С.");
+    std::vector<std::string> codes;
+    for(const auto& group:groups){
+        if(!group.is_object()||!group.contains("count")||!group["count"].is_number_integer()||group["count"]<1||group["count"]>1000||!group.contains("code")||!group["code"].is_string())throw InputError("В каждой группе нужны положительное количество и строка кода 1С.");
+        auto code=validate_one_c(group["code"].get<std::string>());auto count=group["count"].get<size_t>();
+        if(codes.size()+count>cards.size())throw InputError("Сумма количеств кодов 1С превышает число выбранных номеров.");
+        codes.insert(codes.end(),count,code);
+    }
+    if(codes.size()!=cards.size())throw InputError("Распределите код 1С для всех выбранных номеров. Код может быть пустым.");
+    std::set<long long> unique;std::vector<std::pair<long long,long long>> expected;
+    for(const auto& c:cards){
+        if(!c.is_object()||!c.contains("id")||!c["id"].is_number_integer()||c["id"]<=0||c["id"]>std::numeric_limits<long long>::max()||!c.contains("revision")||!c["revision"].is_number_integer()||c["revision"]<0||c["revision"]>=std::numeric_limits<long long>::max())throw InputError("Некорректная карточка или версия бланка.");
+        auto id=c["id"].get<long long>();if(!unique.insert(id).second)throw InputError("Карточка выбрана дважды.");expected.emplace_back(id,c["revision"].get<long long>());
+    }
+    std::lock_guard<std::mutex> guard(mutex_);exec(db_,"BEGIN IMMEDIATE");json result=json::array();
+    try{for(size_t i=0;i<expected.size();i++){
+        auto [id,revision]=expected[i];Statement row(db_,"SELECT one_c_code,document_revision,document_json,workbook FROM cards WHERE id=?");row.integer(1,id);
+        if(!row.step())throw NotFound("Одна из карточек не найдена.");
+        if(row.int_at(1)!=revision)throw RevisionConflict("Один из бланков изменен. Обновите список выбранных номеров и повторите распределение кодов 1С.");
+        if(row.text_at(0)!=codes[i]){
+            auto p=static_cast<const char*>(sqlite3_column_blob(row.value,3));auto n=sqlite3_column_bytes(row.value,3);auto bytes=set_workbook_one_c(std::string(p?p:"",n),codes[i]);
+            auto raw=row.text_at(2);json document=raw.empty()?json():json::parse(raw);if(!document.is_null()&&!set_document_one_c(document,codes[i]))throw InputError("В сохраненном бланке не найдено поле «Код 1С». Восстановите поле в редакторе.");
+            Statement update(db_,"UPDATE cards SET one_c_code=?,workbook=?,document_json=?,document_revision=document_revision+1,document_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?");
+            update.text(1,codes[i]);update.blob(2,bytes);if(document.is_null())sqlite3_bind_null(update.value,3);else update.text(3,document.dump());update.integer(4,id);update.step();
+        }
+        auto sql=std::string(card_select)+"WHERE c.id=?";Statement selected(db_,sql.c_str());selected.integer(1,id);selected.step();result.push_back(read_card(selected));
+    }exec(db_,"COMMIT");return result;}catch(...){sqlite3_exec(db_,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
 }
