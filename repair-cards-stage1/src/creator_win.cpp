@@ -2,6 +2,9 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include "api_client.h"
+#include "labels.h"
+#include "label_dialog_win.h"
+#include "win_support.h"
 #include <chrono>
 #include <functional>
 #include <future>
@@ -48,6 +51,9 @@ struct NamePrompt {
     bool done = false, accepted = false;
     int scale = 96;
     std::wstring value;
+    std::wstring label=L"Название типа платформы:";
+    std::wstring empty_message=L"Введите название платформы.";
+    int limit=80;
 };
 LRESULT CALLBACK prompt_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     auto* p = reinterpret_cast<NamePrompt*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -58,12 +64,12 @@ LRESULT CALLBACK prompt_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     if (!p) return DefWindowProcW(window, message, wp, lp);
     auto unit = [p](int value) { return MulDiv(value, p->scale, 96); };
     if (message == WM_CREATE) {
-        auto label = control(window, L"STATIC", L"Название типа платформы:", 0, -1, p->font);
+        auto label = control(window, L"STATIC", p->label.c_str(), 0, -1, p->font);
         MoveWindow(label, unit(16), unit(16), unit(380), unit(24), TRUE);
         p->edit = control(window, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 10, p->font);
         MoveWindow(p->edit, unit(16), unit(44), unit(380), unit(28), TRUE);
-        SendMessageW(p->edit, EM_SETLIMITTEXT, 80, 0);
-        auto add = control(window, L"BUTTON", L"Добавить", WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK, p->font);
+        SendMessageW(p->edit, EM_SETLIMITTEXT, p->limit, 0);
+        auto add = control(window, L"BUTTON", L"ОК", WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK, p->font);
         auto cancel = control(window, L"BUTTON", L"Отмена", WS_TABSTOP, IDCANCEL, p->font);
         MoveWindow(add, unit(166), unit(92), unit(110), unit(30), TRUE);
         MoveWindow(cancel, unit(286), unit(92), unit(110), unit(30), TRUE);
@@ -73,7 +79,7 @@ LRESULT CALLBACK prompt_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
         auto value = text(p->edit);
         auto first = value.find_first_not_of(L" \t\r\n");
         if (first == std::wstring::npos) {
-            MessageBoxW(window, L"Введите название платформы.", L"Тип платформы", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(window, p->empty_message.c_str(), L"Ввод", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         p->value = value.substr(first, value.find_last_not_of(L" \t\r\n") - first + 1);
@@ -85,11 +91,12 @@ LRESULT CALLBACK prompt_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(window, message, wp, lp);
 }
-std::wstring ask_platform(HWND owner, HFONT font, int dpi) {
+std::wstring ask_platform(HWND owner, HFONT font, int dpi, bool scan = false) {
     NamePrompt state; state.font = font; state.scale = dpi;
+    if(scan){state.label=L"QR-ссылка или внутренний номер карточки:";state.empty_message=L"Сканируйте QR или введите номер.";state.limit=1024;}
     RECT parent{}; GetWindowRect(owner, &parent);
     int width = MulDiv(430, dpi, 96), height = MulDiv(175, dpi, 96);
-    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"RepairPlatformPrompt", L"Добавить тип платформы",
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"RepairPlatformPrompt", scan?L"Открыть бланк по QR":L"Добавить тип платформы",
         WS_CAPTION | WS_SYSMENU | WS_POPUP, parent.left + (parent.right - parent.left - width) / 2,
         parent.top + (parent.bottom - parent.top - height) / 2, width, height, owner, nullptr,
         GetModuleHandleW(nullptr), &state);
@@ -116,8 +123,8 @@ std::wstring ask_platform(HWND owner, HFONT font, int dpi) {
 }
 
 enum Id { Server = 100, Connect, Platform, Add, First, Count, Preview, Register, List,
-          Open, Refresh, Previous, Next };
-enum class Job { Connect, Add, Cards, Preview, ConfirmRegistration, Register };
+          Open, Refresh, Previous, Next, Labels, LastLabels, ScanInput };
+enum class Job { Connect, Add, Cards, Preview, ConfirmRegistration, Register, Labels, Scan };
 struct Batch {
     std::string base, first, platform_name;
     long long platform = 0;
@@ -130,9 +137,11 @@ public:
     int dpi = 96;
     bool busy = false, closing = false;
     HWND server{}, connect{}, platform{}, add{}, first{}, count{}, preview{}, create{}, list{},
-         open{}, refresh{}, previous{}, next{}, status{}, range{}, note{};
+         open{}, refresh{}, previous{}, next{}, status{}, range{}, note{},labels_button{},batch_button{},scan_button{};
     HWND server_label{}, platform_label{}, first_label{}, count_label{}, list_label{};
     std::string connected_base;
+    std::string server_id,last_batch_server;
+    Json last_batch=Json::array(),preferences=Json::object();
     Json platforms = Json::array(), cards = Json::array();
     long long current_after = 0;
     std::vector<long long> history;
@@ -151,7 +160,12 @@ public:
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         server_label = control(window, L"STATIC", L"Сервер:", 0, -1, font);
         server = control(window, L"EDIT", L"http://127.0.0.1:8080", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, Server, font);
+        preferences=repair::win::load_profile("creator.json");
+        if(preferences.contains("server")&&preferences["server"].is_string())set_text(server,wide(preferences["server"].get<std::string>()));
+        if(preferences.contains("last_batch")&&preferences["last_batch"].is_array())last_batch=preferences["last_batch"];
+        last_batch_server=preferences.value("last_batch_server","");
         connect = control(window, L"BUTTON", L"Подключить", WS_TABSTOP, Connect, font);
+        scan_button=control(window,L"BUTTON",L"QR → редактор",WS_TABSTOP,ScanInput,font);
         platform_label = control(window, L"STATIC", L"Тип платформы:", 0, -1, font);
         platform = control(window, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, Platform, font);
         add = control(window, L"BUTTON", L"+", WS_TABSTOP, Add, font);
@@ -164,8 +178,8 @@ public:
         preview = control(window, L"BUTTON", L"Проверить диапазон", WS_TABSTOP, Preview, font);
         create = control(window, L"BUTTON", L"Создать партию", WS_TABSTOP | BS_DEFPUSHBUTTON, Register, font);
         range = control(window, L"STATIC", L"", 0, -1, font);
-        list_label = control(window, L"STATIC", L"Зарегистрированные карточки", 0, -1, font);
-        list = control(window, WC_LISTVIEWW, L"", WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, List, font);
+        list_label = control(window, L"STATIC", L"Карточки: Ctrl / Shift — выбор нескольких для QR", 0, -1, font);
+        list = control(window, WC_LISTVIEWW, L"", WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS, List, font);
         ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
         const wchar_t* names[] = {L"Внутренний ID", L"ID продукции", L"Тип платформы"};
         for (int i = 0; i < 3; ++i) {
@@ -175,10 +189,12 @@ public:
         }
         open = control(window, L"BUTTON", L"Редактировать", WS_TABSTOP, Open, font);
         refresh = control(window, L"BUTTON", L"Обновить", WS_TABSTOP, Refresh, font);
+        labels_button=control(window,L"BUTTON",L"QR / BarTender",WS_TABSTOP,Labels,font);
+        batch_button=control(window,L"BUTTON",L"QR последней партии",WS_TABSTOP,LastLabels,font);
         previous = control(window, L"BUTTON", L"Назад", WS_TABSTOP, Previous, font);
         next = control(window, L"BUTTON", L"Следующие 100", WS_TABSTOP, Next, font);
         status = control(window, L"STATIC", L"Запустите сервер и нажмите «Подключить».", 0, -1, font);
-        note = control(window, L"STATIC", L"Редактирование бланка открывается в браузере. Изменения сохраняются кнопкой «Сохранить».", 0, -1, font);
+        note = control(window, L"STATIC", L"QR ведет на просмотр. Макет, предпросмотр и настройки печати — в BarTender.", 0, -1, font);
         SetTimer(window, 1, 60, nullptr);
         fill_platforms(0); layout(); enable_controls();
     }
@@ -186,7 +202,8 @@ public:
         RECT rect{}; GetClientRect(window, &rect);
         int w = MulDiv(rect.right, 96, dpi), h = MulDiv(rect.bottom, 96, dpi);
         move(server_label, 16, 23, 90, 24);
-        move(server, 160, 18, w - 330, 30); move(connect, w - 154, 18, 138, 30);
+        move(server, 160, 18, w - 488, 30); move(connect, w - 154, 18, 138, 30);
+        move(scan_button,w-312,18,146,30);
         move(platform_label, 16, 73, 140, 24);
         move(platform, 160, 66, w - 224, 300); move(add, w - 54, 66, 38, 30);
         move(first_label, 16, 121, 140, 24); move(first, 160, 114, 230, 30);
@@ -196,7 +213,8 @@ public:
         move(list_label, 16, 220, w - 32, 24);
         move(list, 16, 250, w - 32, h - 382);
         ListView_SetColumnWidth(list, 2, unit(w - 414));
-        move(open, 16, h - 116, 170, 32); move(refresh, 198, h - 116, 112, 32);
+        move(open, 16, h - 116, 150, 32); move(refresh, 178, h - 116, 100, 32);
+        move(labels_button,290,h-116,150,32);move(batch_button,452,h-116,165,32);
         move(previous, w - 272, h - 116, 100, 32); move(next, w - 160, h - 116, 144, 32);
         move(status, 16, h - 70, w - 32, 28); move(note, 16, h - 34, w - 32, 24);
     }
@@ -245,7 +263,10 @@ public:
         for (auto hwnd : {server, connect}) EnableWindow(hwnd, !busy);
         for (auto hwnd : {platform, add, refresh}) EnableWindow(hwnd, !busy && connected);
         for (auto hwnd : {first, count, preview, create}) EnableWindow(hwnd, !busy && connected && selected_platform() > 0);
-        EnableWindow(open, !busy && ListView_GetNextItem(list, -1, LVNI_SELECTED) >= 0);
+        EnableWindow(open, !busy && ListView_GetSelectedCount(list) == 1);
+        EnableWindow(labels_button,!busy&&connected&&ListView_GetSelectedCount(list)>0);
+        EnableWindow(batch_button,!busy&&connected&&!last_batch.empty()&&last_batch_server==server_id);
+        EnableWindow(scan_button,!busy&&connected);
         EnableWindow(previous, !busy && !history.empty());
         EnableWindow(next, !busy && cards.size() == 100);
     }
@@ -279,6 +300,7 @@ public:
         return b;
     }
     void open_card() {
+        if(ListView_GetSelectedCount(list)!=1)throw repair::ApiError("Для редактирования выберите одну карточку.");
         auto url = base(); int index = ListView_GetNextItem(list, -1, LVNI_SELECTED);
         if (index < 0) return;
         auto link = wide(url + "/edit/" + std::to_string(cards.at(index).at("id").get<long long>()));
@@ -291,7 +313,7 @@ public:
             auto url = repair::normalize_server_url(utf8(text(server)));
             start(Job::Connect, [url] {
                 repair::ApiClient api(url); api.health();
-                return Json{{"base", url}, {"platforms", api.platforms()}, {"cards", api.cards(0)}};
+                return Json{{"base", url}, {"platforms", api.platforms()}, {"cards", api.cards(0)}, {"info",api.server_info()}};
             });
         } else if (id == Add) {
             auto url = base(); auto name = ask_platform(window, font, dpi);
@@ -304,6 +326,18 @@ public:
             start(id == Preview ? Job::Preview : Job::ConfirmRegistration, [snapshot] {
                 return repair::ApiClient(snapshot.base).preview(snapshot.first, snapshot.count);
             });
+        } else if(id==Labels||id==LastLabels){
+            auto url=base();Json selected=Json::array();
+            if(id==LastLabels){if(last_batch_server!=server_id)throw repair::ApiError("Последняя партия относится к другой базе.");selected=last_batch;}
+            else{int index=-1;while((index=ListView_GetNextItem(list,index,LVNI_SELECTED))>=0)selected.push_back(cards.at(index));}
+            if(selected.empty())throw repair::ApiError("Выберите карточки для QR.");
+            start(Job::Labels,[url,selected]{return Json{{"info",repair::ApiClient(url).server_info()},{"cards",selected}};});
+        } else if(id==ScanInput){
+            auto url=base();auto input=ask_platform(window,font,dpi,true);if(input.empty())return;
+            auto scan=repair::parse_scan(utf8(input),url);auto expected=server_id;
+            start(Job::Scan,[scan,expected]{repair::ApiClient api(scan.base);auto info=api.server_info();
+                if(info.at("server_id").get<std::string>()!=expected)throw repair::ApiError("QR относится к другой базе.");
+                return api.card(scan.id);});
         } else if (id == Refresh) load_cards(0);
         else if (id == Next && !cards.empty()) load_cards(cards.back().at("id").get<long long>());
         else if (id == Previous && !history.empty()) load_cards(history.back());
@@ -312,6 +346,9 @@ public:
     void finish(Job kind, const Json& result) {
         if (kind == Job::Connect) {
             connected_base = result.at("base").get<std::string>();
+            server_id=result.at("info").at("server_id").get<std::string>();
+            preferences["server"]=connected_base;
+            try{repair::win::save_profile("creator.json",preferences);}catch(const std::exception&){}
             platforms = result.at("platforms"); fill_platforms(0); current_after = 0; history.clear();
             render_cards(result.at("cards"));
         } else if (kind == Job::Add) {
@@ -350,12 +387,22 @@ public:
             auto next_id = result.at("next_product_id").get<std::string>();
             for (auto& p : platforms) if (p.at("id").get<long long>() == pending.platform) p["next_product_id"] = next_id;
             set_text(first, wide(next_id));
+            last_batch=result.at("cards");last_batch_server=server_id;
+            for(auto& row:last_batch){row["platform_name"]=pending.platform_name;row["platform_type_id"]=pending.platform;}
+            preferences["last_batch"]=last_batch;preferences["last_batch_server"]=server_id;
+            try{repair::win::save_profile("creator.json",preferences);}catch(const std::exception&){}
             auto message = L"Создано карточек: " + std::to_wstring(result.at("count").get<int>()) + L".\n" +
                 wide(result.at("first_product_id").get<std::string>()) + L" — " + wide(result.at("last_product_id").get<std::string>()) +
-                L"\nСледующий ID: " + wide(next_id);
+                L"\nСледующий ID: " + wide(next_id)+L"\nДля этикеток нажмите «QR последней партии».";
             set_text(range, L"Партия зарегистрирована.");
             MessageBoxW(window, message.c_str(), L"Партия сохранена", MB_OK | MB_ICONINFORMATION);
             load_cards(0);
+        } else if(kind==Job::Labels){
+            show_label_dialog(window,base(),result.at("cards"),result.at("info"));
+        } else if(kind==Job::Scan){
+            auto link=wide(base()+"/edit/"+std::to_string(result.at("id").get<long long>()));
+            if(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",link.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+                throw repair::ApiError("Не удалось открыть редактор.");
         }
     }
     void poll() {
@@ -399,6 +446,8 @@ LRESULT CALLBACK app_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
             if (notification->idFrom == List) {
                 if (notification->code == NM_DBLCLK && !app->busy) app->open_card();
                 if (notification->code == LVN_ITEMCHANGED) app->enable_controls();
+                if(notification->code==LVN_KEYDOWN&&!app->busy){auto key=reinterpret_cast<NMLVKEYDOWN*>(lp);
+                    if(key->wVKey=='A'&&(GetKeyState(VK_CONTROL)&0x8000))ListView_SetItemState(app->list,-1,LVIS_SELECTED,LVIS_SELECTED);}
             }
             return 0;
         }
@@ -431,7 +480,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     if (!RegisterClassW(&prompt_class)) return 1;
     App app;
     HDC dc = GetDC(nullptr); int dpi = GetDeviceCaps(dc, LOGPIXELSX); ReleaseDC(nullptr, dc);
-    HWND window = CreateWindowExW(0, L"RepairCreator", L"Креатор — Карточки ремонта (этап 2.2)",
+    HWND window = CreateWindowExW(0, L"RepairCreator", L"Креатор — Карточки ремонта 0.4",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1050, dpi, 96), MulDiv(730, dpi, 96),
         nullptr, nullptr, instance, &app);
     if (!window) { MessageBoxW(nullptr, L"Не удалось открыть окно Креатора.", L"Креатор", MB_OK | MB_ICONERROR); return 1; }

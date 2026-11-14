@@ -2,12 +2,15 @@
 #include "store.h"
 #include "sequence.h"
 #include "document.h"
+#include "labels.h"
+#include "network.h"
 #include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <random>
 
 namespace fs = std::filesystem;
 
@@ -73,6 +76,7 @@ auto safe(Function function) {
     return [function](const httplib::Request& request, httplib::Response& response) {
         try { function(request, response); }
         catch (const InputError& e) { send(response, {{"error", e.what()}}, 400); }
+        catch (const repair::ApiError& e) { send(response, {{"error", e.what()}}, 400); }
         catch (const RevisionConflict& e) { send(response, {{"error", e.what()}}, 409); }
         catch (const NotFound& e) { send(response, {{"error", e.what()}}, 404); }
         catch (const json::exception&) { send(response, {{"error", "Invalid JSON body or field types"}}, 400); }
@@ -85,7 +89,17 @@ auto safe(Function function) {
 
 int main(int argc, char** argv) {
     try {
+        fs::path executable_parent;
+#ifdef _WIN32
+        std::wstring executable(32768,L'\0');
+        auto executable_size=GetModuleFileNameW(nullptr,executable.data(),static_cast<DWORD>(executable.size()));
+        if(!executable_size||executable_size==executable.size())throw std::runtime_error("Cannot resolve executable path");
+        executable.resize(executable_size);executable_parent=fs::path(executable).parent_path();
+#else
+        executable_parent=fs::absolute(fs::u8path(argv[0])).parent_path();
+#endif
         fs::path config_path = fs::u8path("config.example.json");
+        if(argc==1&&fs::exists(executable_parent/"config.example.json"))config_path=executable_parent/"config.example.json";
         if (argc == 3 && std::string(argv[1]) == "--config") config_path = fs::u8path(argv[2]);
         else if (argc != 1) throw InputError("Usage: repair_server [--config path.json]");
         config_path = fs::absolute(config_path);
@@ -98,7 +112,7 @@ int main(int argc, char** argv) {
         auto template_path = config_path.parent_path() / fs::u8path(config.at("template").get<std::string>());
         auto web_root = config_path.parent_path() / fs::u8path(config.value("web", "web"));
         if (!config.contains("web") && !fs::exists(web_root / "document.html"))
-            web_root = fs::absolute(fs::u8path(argv[0])).parent_path() / "web";
+            web_root = executable_parent / "web";
         auto document_page = read_file(web_root / "document.html");
         auto workbook = read_file(template_path);
         if (workbook.size() < 4 || workbook.substr(0, 4) != std::string("PK\x03\x04", 4))
@@ -106,7 +120,30 @@ int main(int argc, char** argv) {
         if (workbook.size() > 10 * 1024 * 1024) throw InputError("Template exceeds 10 MiB");
         fs::create_directories(database.parent_path());
         Store store(database.u8string());
+        if(store.setting("server_id").empty()){
+            std::ostringstream identity;std::random_device random;
+            for(int i=0;i<4;i++)identity<<std::hex<<random();
+            store.set_setting("server_id",identity.str(),true);
+        }
+        auto configured_url=config.value("public_url",std::string());
+        if(!configured_url.empty())store.set_setting("public_url",repair::normalize_public_url(configured_url),true);
+        const bool local_only=host=="127.0.0.1"||host=="localhost"||host=="::1";
+        auto server_info=[&]{return json{{"version","0.4.0"},{"server_id",store.setting("server_id")},
+            {"public_url",store.setting("public_url")},{"local_only",local_only},{"listen_host",host},{"port",port},
+            {"suggested_urls",network_urls(port)}};};
         httplib::Server server;
+        // One process owns this address/port. httplib's SO_REUSEPORT default
+        // could otherwise distribute requests between two different databases.
+        server.set_socket_options([](socket_t socket) {
+            int enabled=1;
+#ifdef _WIN32
+            constexpr int option=SO_EXCLUSIVEADDRUSE;
+#else
+            constexpr int option=SO_REUSEADDR;
+#endif
+            if(setsockopt(socket,SOL_SOCKET,option,reinterpret_cast<const char*>(&enabled),sizeof(enabled))!=0)
+                throw std::runtime_error("Cannot configure listening socket");
+        });
         server.new_task_queue = [] { return new httplib::ThreadPool(4); };
         server.set_payload_max_length(26 * 1024 * 1024);
         server.set_read_timeout(10, 0);
@@ -123,7 +160,26 @@ int main(int argc, char** argv) {
             res.set_content(read_file(web_root / "assets" / name), type);
         }));
         server.Get("/api/health", safe([&](const auto&, auto& res) {
-            send(res, {{"status", "ok"}, {"version", "0.3.0"}, {"sqlite", sqlite3_libversion()}});
+            send(res, {{"status", "ok"}, {"version", "0.4.0"}, {"sqlite", sqlite3_libversion()}});
+        }));
+        server.Get("/api/server-info",safe([&](const auto&,auto& res){send(res,server_info());}));
+        server.Post("/api/labels/cards",safe([&](const auto& req,auto& res){
+            auto body=json::parse(req.body);const auto& list=body.at("ids");
+            if(!list.is_array()||list.empty()||list.size()>1000)throw InputError("Select 1..1000 cards");
+            std::vector<long long> ids;
+            for(const auto& value:list){json wrapped={{"id",value}};ids.push_back(integer_field(wrapped,"id"));}
+            send(res,store.card_set(ids));
+        }));
+        server.Put("/api/settings/public-url",safe([&](const auto& req,auto& res){
+            if(local_only)throw InputError("Для доступа по сети установите host = 0.0.0.0 в конфиге и перезапустите сервер.");
+            auto body=json::parse(req.body);
+            auto url=repair::normalize_public_url(body.at("public_url").template get<std::string>());
+            store.set_setting("public_url",url);send(res,server_info());
+        }));
+        server.Get(R"(/api/cards/([0-9]+)/qr.svg)",safe([&](const auto& req,auto& res){
+            auto id=number(req.matches[1].str());store.card(id);
+            auto url=repair::normalize_public_url(store.setting("public_url"));
+            res.set_content(repair::qr_svg(repair::card_url(url,id)),"image/svg+xml");
         }));
         server.Get("/api/platforms", safe([&](const auto&, auto& res) { send(res, store.platforms()); }));
         server.Post("/api/platforms", safe([&](const auto& req, auto& res) {
@@ -209,9 +265,11 @@ int main(int argc, char** argv) {
         server.set_error_handler([](const auto&, auto& res) {
             if (res.body.empty()) send(res, {{"error", "Route not found"}}, res.status);
         });
-        std::cout << "Repair Cards 0.3.0\nDatabase: " << database.u8string()
+        if(!server.bind_to_port(host,port))throw std::runtime_error("Cannot listen on configured host/port");
+        std::cout << "Repair Cards 0.4.0\nDatabase: " << database.u8string()
                   << "\nListen: http://" << host << ':' << port << "\nStop: Ctrl+C\n" << std::flush;
-        if (!server.listen(host, port)) throw std::runtime_error("Cannot listen on configured host/port");
+        if(host=="0.0.0.0")std::cout<<"Local browser: http://127.0.0.1:"<<port<<"\nQR address is configured in Creator.\n"<<std::flush;
+        if (!server.listen_after_bind()) throw std::runtime_error("Server stopped unexpectedly");
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Startup failed: " << e.what() << '\n';

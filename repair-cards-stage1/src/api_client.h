@@ -15,6 +15,10 @@ class ApiClient {
 public:
     explicit ApiClient(std::string server_url);
     Json health() const;
+    Json server_info() const;
+    Json set_public_url(const std::string& url) const;
+    Json card(long long id) const;
+    Json resolve_cards(const Json& ids) const;
     Json platforms() const;
     Json add_platform(const std::string& name) const;
     Json cards(long long platform, long long after = 0) const;
@@ -22,6 +26,6 @@ public:
     Json register_batch(long long platform, const std::string& first, int count) const;
 private:
     std::string base_;
-    Json request(const std::string& path, const Json* body = nullptr, bool registration = false) const;
+    Json request(const std::string& path, const Json* body = nullptr, bool registration = false, bool put = false) const;
 };
 }

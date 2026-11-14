@@ -4,6 +4,7 @@
 
 namespace repair {
 std::string normalize_server_url(std::string url) {
+    if(url.size()>512)throw ApiError("Адрес сервера слишком длинный.");
     while (!url.empty() && url.back() == '/') url.pop_back();
     // This installation uses an HTTP server in the local network.
     static const std::regex pattern(R"(^http://([A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\])(:([0-9]{1,5}))?$)");
@@ -17,12 +18,13 @@ std::string normalize_server_url(std::string url) {
     return url;
 }
 ApiClient::ApiClient(std::string server_url) : base_(normalize_server_url(std::move(server_url))) {}
-Json ApiClient::request(const std::string& path, const Json* body, bool registration) const {
+Json ApiClient::request(const std::string& path, const Json* body, bool registration, bool put) const {
     httplib::Client client(base_);
     client.set_connection_timeout(2, 0);
     client.set_read_timeout(5, 0);
     client.set_write_timeout(5, 0);
-    auto response = body ? client.Post(path, body->dump(), "application/json; charset=utf-8") : client.Get(path);
+    auto response = body ? (put?client.Put(path,body->dump(),"application/json; charset=utf-8"):
+        client.Post(path, body->dump(), "application/json; charset=utf-8")) : client.Get(path);
     if (!response) {
         if (registration) throw RegistrationUncertain(
             "Ответ на регистрацию не получен. Партия могла сохраниться. "
@@ -49,6 +51,14 @@ Json ApiClient::health() const {
     return data;
 }
 Json ApiClient::platforms() const { return request("/api/platforms"); }
+Json ApiClient::server_info() const { return request("/api/server-info"); }
+Json ApiClient::card(long long id) const { return request("/api/cards/"+std::to_string(id)); }
+Json ApiClient::resolve_cards(const Json& ids) const {
+    Json body={{"ids",ids}};return request("/api/labels/cards",&body);
+}
+Json ApiClient::set_public_url(const std::string& url) const {
+    Json body={{"public_url",url}};return request("/api/settings/public-url",&body,false,true);
+}
 Json ApiClient::add_platform(const std::string& name) const {
     Json body = {{"name", name}};
     return request("/api/platforms", &body);

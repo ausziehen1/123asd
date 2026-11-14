@@ -1,24 +1,28 @@
-# Карточки ремонта: загрузка проекта
+# Карточки ремонта — версия 0.4.0
 
-## Текущий этап 2.2 — редактор бланка
+[Полный ZIP: исходники и готовые Windows EXE](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4-full.zip)
 
-[Скачать полный ZIP](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-editor.zip)
+[Отдельный Ридер для Windows x64](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-reader-win64.zip)
 
-[Обновление существующей базы и проверка редактора](repair-cards-stage1/docs/EDITOR.md).
+[Обновление, первый QR, макет, предпросмотр и печать](repair-cards-stage1/docs/QR_PRINT_READER.md)
 
-В архиве исходники на C++, все C++ и браузерные библиотеки, Excel-шаблон и инструкции. Библиотеки редактора находятся локально в папке `web`; браузеру не нужен Интернет.
+Креатор регистрирует партии и открывает редактор Excel-бланка. Добавлены QR выбранных записей или последней партии, отдельный Ридер для просмотра и передача заданий в BarTender 10.1. Положение и оформление элементов меняются в рабочем .btw; точный предпросмотр, выбор принтера и свойства драйвера доступны в BarTender.
 
-Креатор регистрирует партии и открывает существующий бланк для редактирования. Можно менять ячейки, оформление, строки и столбцы, затем сохранять JSON и текущий XLSX вместе в SQLite. При конфликте двух редакторов устаревшее сохранение отклоняется. Обычная ссылка карточки открывает сохраненный документ только для просмотра.
+Ваш TEST.btw включен без изменений. Один раз нужно связать QR-объект с полем QRUrl и сохранить рабочий макет по инструкции. Печать запускается вручную из диалога BarTender.
 
-Перед обновлением остановите **и сервер, и Креатор**, сделайте копию папки `data`, затем обновите исходники по инструкции. При запуске нового сервера схема базы автоматически обновляется, существующие карточки сохраняются.
+Перед обновлением остановите сервер и Креатор, сохраните копию data и своего конфига. Содержимое RepairCards-stage1 из архива обновляет существующий проект; рабочая база не включена. Готовые EXE находятся в ready-windows, исходники можно собирать в CLion + MinGW64. Схема SQLite обновляется автоматически, сохраняя карточки.
 
-Проверены сборка Windows EXE через LLVM-MinGW, три группы C++ тестов, API и редактор через Playwright/Chromium: ввод, Ctrl+S, вставка строки/столбца, оформление, XLSX, конфликт, просмотр, мобильный размер окна и перезапуск.
+Проверены кросс-сборка трех Windows EXE, четыре группы C++ тестов, API, независимое распознавание QR и браузерный редактор. Реальный запуск новых окон в Windows, BarTender 10.1 и физическая Zebra S4M проверяются на пользовательском ПК — это не заявлено как уже выполненная проверка.
 
-Архив содержит 48 файлов. SHA-256: `4f7cce0f02e489c34f02783652691eebaceb2640598a5c3640deab28c27b1a23`.
+Контрольные суммы:
 
-## Предыдущие этапы
+- [Полный архив SHA-256](downloads/RepairCards-0.4-full.zip.sha256)
+- [Ридер SHA-256](downloads/RepairCards-reader-win64.zip.sha256)
 
-- [Этап 2.1 — регистрация через окно Креатора](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-creator.zip)
-- [Этап 1 — сервер и SQLite](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage1.zip)
+## Предыдущие версии
 
-[Исходники текущего этапа](repair-cards-stage1).
+- [0.3 — редактор](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-editor.zip)
+- [0.2 — Креатор](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-creator.zip)
+- [0.1 — сервер и SQLite](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage1.zip)
+
+[Исходники текущей версии](repair-cards-stage1).

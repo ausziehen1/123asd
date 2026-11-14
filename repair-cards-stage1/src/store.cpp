@@ -64,7 +64,7 @@ Store::Store(const std::string& filename) {
         exec(db_, "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
         long long v = 0;
         { Statement version(db_, "PRAGMA user_version"); version.step(); v = version.int_at(0); }
-        if (v > 2) throw std::runtime_error("Database belongs to a newer application version");
+        if (v > 3) throw std::runtime_error("Database belongs to a newer application version");
         if (v == 0) {
             exec(db_,
                 "BEGIN IMMEDIATE;"
@@ -87,9 +87,21 @@ Store::Store(const std::string& filename) {
                 "ALTER TABLE cards ADD COLUMN document_updated_at TEXT;"
                 "PRAGMA user_version=2; COMMIT;");
         }
+        if(v<3)exec(db_,"BEGIN IMMEDIATE;CREATE TABLE app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);PRAGMA user_version=3;COMMIT;");
     } catch (...) { sqlite3_close(db_); db_ = nullptr; throw; }
 }
 Store::~Store() { sqlite3_close(db_); }
+std::string Store::setting(const std::string& key) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    Statement query(db_,"SELECT value FROM app_settings WHERE key=?");query.text(1,key);
+    return query.step()?query.text_at(0):std::string();
+}
+void Store::set_setting(const std::string& key,const std::string& value,bool only_if_missing) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    Statement update(db_,only_if_missing?"INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING":
+        "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    update.text(1,key);update.text(2,value);update.step();
+}
 
 json Store::create_platform(const std::string& name) {
     if (name.empty() || name.size() > 200 || name.find_first_not_of(" \t\r\n") == std::string::npos)
@@ -155,6 +167,19 @@ json Store::card(long long id) {
     Statement q(db_, sql.c_str()); q.integer(1, id);
     if (!q.step()) throw NotFound("Card not found");
     return read_card(q);
+}
+json Store::card_set(const std::vector<long long>& ids) {
+    if(ids.empty()||ids.size()>1000)throw InputError("Select 1..1000 cards");
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto sql=std::string(card_select)+"WHERE c.id=?";
+    Statement query(db_,sql.c_str());json result=json::array();
+    for(auto id:ids){
+        if(id<=0)throw InputError("Invalid card ID");
+        sqlite3_reset(query.value);sqlite3_clear_bindings(query.value);query.integer(1,id);
+        if(!query.step())throw NotFound("Одна из выбранных карточек не найдена. Обновите список перед печатью.");
+        result.push_back(read_card(query));
+    }
+    return result;
 }
 std::string Store::workbook(long long id) {
     std::lock_guard<std::mutex> guard(mutex_);
