@@ -7,6 +7,10 @@ Dependencies are included so the project can build without downloads.
 | SQLite amalgamation | 3.50.4 | Public domain, https://sqlite.org/copyright.html |
 | cpp-httplib | 0.28.0 | MIT, `HTTPLIB-LICENSE` |
 | nlohmann/json | 3.12.0 | MIT, `JSON-LICENSE` |
+| miniz | 3.0.2 | MIT, `MINIZ-LICENSE` |
+| pugixml | 1.14 | MIT, `PUGIXML-LICENSE` |
+| PicoSHA2 | 1.0.1 | MIT, `PICOSHA2-LICENSE` |
+| Microsoft WebView2 SDK (native header and x64 loader) | 1.0.2903.40 | Microsoft BSD, `webview2/LICENSE.txt` |
 | Nayuki QR Code generator (C++) | 1.8.0 | MIT, embedded in `qrcodegen/qrcodegen.cpp` and `.hpp` |
 
 SQLite's generated `sqlite3.c` and `sqlite3.h` were obtained from the pinned
@@ -35,3 +39,14 @@ Browser library versions, licenses and hashes: `../web/assets/README.md`.
 
 Ready Windows EXEs are statically linked using LLVM-MinGW 20261104 (Clang 23.1.5).
 Runtime license notices are included in `runtime-licenses/`; BarTender and Zebra drivers are not bundled.
+
+Sources for 0.5 dependencies:
+
+- https://github.com/richgel999/miniz/tree/3.0.2 (static build; miniz_export.h defines MINIZ_EXPORT empty, as for a static generated export header).
+- https://github.com/zeux/pugixml/tree/v1.14/src
+- https://github.com/okdshin/PicoSHA2/tree/v1.0.1
+- https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.2903.40 (native WebView2.h, x64 WebView2Loader.dll and license). The header's EventToken.h include is changed to lowercase eventtoken.h for case-sensitive MinGW cross-builds; no interface definitions were altered. Loader binary is unmodified.
+
+WebView2 Runtime is a separate Microsoft installation, not bundled as part of the SDK. Runtime and deployment: https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+
+Own QR icon: resources/qr.ico. No external icon library is required.

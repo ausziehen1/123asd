@@ -237,6 +237,7 @@
   async function start() {
     try {
       const [card, stored] = await Promise.all([request(`/api/cards/${id}`), request(`/api/cards/${id}/document`)]);
+      if(typeof stored.one_c_code==='string')card.one_c_code=stored.one_c_code;
       document.getElementById('title').textContent = (editable ? 'Редактирование: ' : 'Просмотр: ') + card.product_id;
       cardInfo=card;renderIdentity();
       let state = stored.document; revision = stored.revision;
@@ -308,6 +309,7 @@
   });
   document.addEventListener('keydown',event=>{if(editable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='s'){event.preventDefault();event.stopPropagation();save();}},true);
   window.addEventListener('beforeunload',event=>{if(editable && loaded && (dirty || saving || snapshot()!==savedSnapshot)){event.preventDefault();event.returnValue='';}});
+  window.repairIsDirty=()=>{if(!editable||!loaded)return false;if(spreadsheet.sheet.editor)spreadsheet.sheet.editor.clear();checkDirty();return dirty||saving||snapshot()!==savedSnapshot;};
   window.repairSaveAndClose=async()=>{ const ok=await save();notify('save-close',{ok:!!ok}); };
   document.addEventListener('input',()=>{if(editable&&loaded)notify('state',{dirty:true,saving});});
   start();

@@ -48,10 +48,20 @@ jobs:
       - name: Native windows and embedded Reader/Repair smoke
         shell: pwsh
         run: ./repair-cards-stage1/scripts/ci_windows_smoke.ps1 -BuildDir ./windows-build
+      - name: Released Windows EXEs smoke
+        shell: pwsh
+        run: |
+          $archive = 'downloads/RepairCards-0.5.0-full.zip'
+          if (Test-Path $archive) {
+            Expand-Archive $archive -DestinationPath ready-smoke
+            Copy-Item ./windows-build/client_ui_tests.exe ./ready-smoke/RepairCards-stage1/ready-windows/
+            ./repair-cards-stage1/scripts/ci_windows_smoke.ps1 -BuildDir ./ready-smoke/RepairCards-stage1/ready-windows
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: repair-cards-windows-test-report
           path: |
             windows-build/Testing/Temporary/LastTest.log
-            ~/AppData/Local/RepairCards/viewer-diagnostic.json
+            windows-build/viewer-diagnostic.json
+            ready-smoke/RepairCards-stage1/ready-windows/viewer-diagnostic.json

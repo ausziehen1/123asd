@@ -43,10 +43,18 @@ with tempfile.TemporaryDirectory(prefix='repair-onec-browser-') as temp:
   with sync_playwright() as p:
    browser=p.chromium.launch(executable_path=CHROMIUM,headless=True,args=['--no-sandbox']);context=browser.new_context(viewport={'width':1500,'height':1000})
    context.add_init_script('window.__hostMessages=[];window.chrome=window.chrome||{};window.chrome.webview={postMessage:x=>window.__hostMessages.push(x)}')
-   page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)));page.goto(BASE+'/edit/2?embedded=1');expect(page.locator('#state')).to_contain_text('Бланк открыт')
+   page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+   old_card=call('/api/cards/2')
+   page.route('**/api/cards/2',lambda route:route.fulfill(json=old_card))
+   def newer_document(route):
+    call('/api/labels/assign',{'cards':[{'id':2,'revision':old_card['document_revision']}],'groups':[{'count':1,'code':'RACE001'}]})
+    route.fulfill(json=call('/api/cards/2/document'))
+   page.route('**/api/cards/2/document',newer_document)
+   page.goto(BASE+'/edit/2?embedded=1');expect(page.locator('#state')).to_contain_text('Бланк открыт')
+   page.unroute('**/api/cards/2');page.unroute('**/api/cards/2/document')
    assert page.locator('body').evaluate('e=>e.classList.contains("embedded")')
    assert page.evaluate('repairSheet.cell(4,9).repairField')=='one_c_code'
-   assert page.evaluate('repairSheet.cell(4,9).text')=='Код 1С: 123'
+   assert page.evaluate('repairSheet.cell(4,9).text')=='Код 1С: RACE001'
    choose(page,4,9);page.locator('#insert-column').click();page.locator('#insert-row').click()
    assert page.evaluate('repairSheet.cell(5,10).repairField')=='one_c_code'
    choose(page,5,10,True);editor=page.locator('.x-spreadsheet-editor textarea');editor.fill('Код 1С: 00099');editor.press('Control+s');expect(page.locator('#state')).to_have_text('Бланк сохранен.')

@@ -177,7 +177,7 @@ struct Dialog {
     void position_groups(){
         RECT rect{};GetClientRect(group_panel,&rect);int height=u(static_cast<int>(groups.size())*40);int page=rect.bottom;
         group_scroll=std::max(0,std::min(group_scroll,std::max(0,height-page)));
-        SCROLLINFO scroll{sizeof(scroll),SIF_RANGE|SIF_PAGE|SIF_POS,0,std::max(0,height-1),static_cast<UINT>(page),group_scroll,0};SetScrollInfo(group_panel,SB_VERT,&scroll,TRUE);
+        SCROLLINFO scroll{sizeof(scroll),SIF_RANGE|SIF_PAGE|SIF_POS,0,std::max(0,height-1),static_cast<UINT>(page),group_scroll,0};SetScrollInfo(group_panel,SB_VERT,&scroll,TRUE);GetClientRect(group_panel,&rect);
         for(size_t i=0;i<groups.size();i++){auto& g=groups[i];int y=u(static_cast<int>(i)*40+3)-group_scroll;MoveWindow(g.quantity,u(4),y,u(70),u(32),TRUE);MoveWindow(g.value,u(82),y,std::max(u(50),static_cast<int>(rect.right)-u(128)),u(32),TRUE);MoveWindow(g.action,rect.right-u(38),y,u(32),u(32),TRUE);}
     }
     void scroll_groups(int action){SCROLLINFO info{};info.cbSize=sizeof(info);info.fMask=SIF_ALL;GetScrollInfo(group_panel,SB_VERT,&info);if(action==SB_THUMBTRACK)group_scroll=info.nTrackPos;else if(action==SB_LINEUP)group_scroll-=u(40);else if(action==SB_LINEDOWN)group_scroll+=u(40);else if(action==SB_PAGEUP)group_scroll-=info.nPage;else if(action==SB_PAGEDOWN)group_scroll+=info.nPage;position_groups();}

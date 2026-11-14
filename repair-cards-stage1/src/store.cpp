@@ -207,12 +207,12 @@ std::string Store::workbook(long long id) {
 }
 json Store::document(long long id) {
     std::lock_guard<std::mutex> guard(mutex_);
-    Statement q(db_, "SELECT document_json,document_revision,document_updated_at FROM cards WHERE id=?");
+    Statement q(db_, "SELECT document_json,document_revision,document_updated_at,one_c_code FROM cards WHERE id=?");
     q.integer(1, id);
     if (!q.step()) throw NotFound("Card not found");
     auto raw = q.text_at(0), updated = q.text_at(2);
     return {{"revision", q.int_at(1)}, {"document", raw.empty() ? json(nullptr) : json::parse(raw)},
-            {"updated_at", updated.empty() ? json(nullptr) : json(updated)}};
+            {"updated_at", updated.empty() ? json(nullptr) : json(updated)},{"one_c_code",q.text_at(3)}};
 }
 json Store::save_document(long long id, long long expected_revision, const json& document,
                           const std::string& workbook) {

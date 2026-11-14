@@ -26,7 +26,7 @@ void style_control(HWND control){
 bool theme_message(HWND window,UINT message,WPARAM w,LPARAM l,LRESULT& result){
  if(message==WM_SYSCOMMAND&&((w&0xfff0)==0xa110||(w&0xfff0)==0xa120)){
   if((w&0xfff0)==0xa110){auto file=repair::win::executable_directory()/L"Updater.exe";if(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",file.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)MessageBoxW(window,L"Рядом с приложением не найден Updater.exe. Восстановите его из полного архива.",L"Обновление",MB_OK|MB_ICONWARNING);}
-  else {std::wstring value=L"Repair Cards 0.5.0";try{std::ifstream in(repair::win::executable_directory()/L"installation.json");auto data=nlohmann::json::parse(in);value=L"Repair Cards "+repair::win::wide(data.at("version").get<std::string>());}catch(...){}MessageBoxW(window,value.c_str(),L"О программе",MB_OK);}
+  else {std::wstring value=L"Repair Cards "+repair::win::wide(REPAIR_CLIENT_VERSION);try{std::ifstream in(repair::win::executable_directory()/L"installation.json");auto data=nlohmann::json::parse(in);value=L"Repair Cards "+repair::win::wide(data.at("version").get<std::string>());}catch(...){}MessageBoxW(window,value.c_str(),L"О программе",MB_OK);}
   result=0;return true;
  }
  auto& t=theme();

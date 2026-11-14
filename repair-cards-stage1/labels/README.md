@@ -7,6 +7,8 @@ The document identifies BarTender 10.1 SR3 build 2950 Enterprise Automation and 
 
 Creator seeds `%LOCALAPPDATA%\RepairCards\labels\RepairCards.btw` only when absent. A different working `.btw` can be selected. In BarTender, bind the QR source to database field `QRUrl`, disable serialization/transforms, check automatic QR version/encoding and dimensions, and save the document.
 
-Jobs contain UTF-8 BOM CSV with quoted headers `InternalID,ProductID,Platform,QRUrl`. Creator attaches the selected job using BarTender's supported CLI. Full instructions: [QR_PRINT_READER.md](../docs/QR_PRINT_READER.md).
+Jobs contain UTF-8 BOM CSV with quoted headers `InternalID,ProductID,Platform,QRUrl,OneCCode`. Creator attaches the selected job using BarTender's supported CLI. Full instructions: [QR_PRINT_READER.md](../docs/QR_PRINT_READER.md).
 
 The user's template is a project input, not covered by third-party library licenses. BarTender and printer drivers are installed separately.
+
+For 0.5, add a text object bound to database field `OneCCode` in the user's working template. Empty code gives empty text. The original binary stays unchanged and the persistent configured working template is preserved. Current guide: [CLIENTS.md](../docs/CLIENTS.md).

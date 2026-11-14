@@ -1,6 +1,6 @@
 {
   "product": "RepairCardsClients",
-  "version": "0.5.0",
+  "version": "@PROJECT_VERSION@",
   "abi": 1,
   "architecture": "x64"
 }

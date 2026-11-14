@@ -43,7 +43,7 @@ struct Scanner{
    if(connecting){set_text(status,L"Сервер подключен. Для изменения адреса нажмите «Сервер».");SetFocus(input);return;}
    auto card=data.at("card");set_text(identity,wide(card.at("product_id").get<std::string>()+" · "+card.at("platform_name").get<std::string>()+" · Unique ID: "+std::to_string(card.at("id").get<long long>())+" · 1C Code: "+card.value("one_c_code",std::string())));
    auto url=data.at("url").get<std::string>();if(repair)url=server+"/edit/"+std::to_string(card.at("id").get<long long>());
-   if(!open_card_viewer(window,url,repair)){set_text(status,L"Переход к другому бланку отменен. Текущие правки сохранены в окне редактора.");return;}set_text(status,repair?L"Бланк открыт в Repair. Сохранение — кнопкой в бланке или Ctrl+S.":L"Бланк открыт для просмотра. Можно сканировать следующий номер.");set_text(input,L"");SetFocus(input);
+   if(!open_card_viewer(window,url,repair)){set_text(status,L"Переход к другому бланку отменен. Текущие правки сохранены в окне редактора.");return;}set_text(status,repair?L"Бланк открыт в Repair. Сохранение — кнопкой в бланке или Ctrl+S.":L"Бланк открыт для просмотра. Следующий номер сканируйте в поле QR.");set_text(input,L"");
   }catch(const std::exception& e){busy=false;if(closing){DestroyWindow(window);return;}controls(true);set_text(status,wide(e.what()));if(connecting)show_server(true);else{SetFocus(input);SendMessageW(input,EM_SETSEL,0,-1);}}
  }
 };

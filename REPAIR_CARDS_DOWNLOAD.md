@@ -1,36 +1,31 @@
-# Карточки ремонта — версия 0.4.1
+# Repair Cards — 0.5.0
 
-[Исправленный Креатор 0.4.1 для Windows x64](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4.1-creator-win64.zip) — для текущего исправления достаточно заменить Креатор; совместим с сервером 0.4.
+[Полный архив: исходники и готовые Windows EXE/DLL](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-full.zip)
 
-[Полный ZIP: исходники и готовые Windows EXE](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4.1-full.zip)
+Отдельные комплекты:
 
-[Отдельный Ридер для Windows x64](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4.1-reader-win64.zip)
+- [Creator](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-creator-win64.zip)
+- [Reader](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-reader-win64.zip)
+- [Repair](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.5.0-repair-win64.zip)
 
-[Обновление, первый QR, макет, предпросмотр и печать](repair-cards-stage1/docs/QR_PRINT_READER.md)
+[Обновление и пошаговый запуск](repair-cards-stage1/docs/CLIENTS.md)
 
-В 0.4.1 исправлено формирование командной строки BarTender: параметры передаются без внешних кавычек, пути заключены в кавычки после знака равенства. Добавлены /MAX, проверка видимого окна и журнал bartender-launch.log. Работа самого BarTender проверяется на пользовательском ПК.
+В Creator — распределение кодов 1С группами «кол-во / код», плюс справа у последней строки и минус у предыдущих, предварительное назначение каждому номеру. Код сохраняется в SQLite, бланке и XLSX и передается BarTender как OneCCode. В макете один раз добавьте текстовый объект с этим источником; QRUrl остается прежним.
 
-Креатор регистрирует партии и открывает редактор Excel-бланка. Добавлены QR выбранных записей или последней партии, отдельный Ридер для просмотра и передача заданий в BarTender 10.1. Положение и оформление элементов меняются в рабочем .btw; точный предпросмотр, выбор принтера и свойства драйвера доступны в BarTender.
+Reader показывает бланк во встроенном окне, Repair позволяет редактировать и сохранять. Все три клиента имеют QR-иконку и общую спокойную тему. Подтвержденный сервер скрывается, повторно показывается по нажатию «Сервер»; Enter открывает QR.
 
-Ваш TEST.btw включен без изменений. Один раз нужно связать QR-объект с полем QRUrl и сохранить рабочий макет по инструкции. Печать запускается вручную из диалога BarTender.
+Клиентская логика находится в RepairClient.dll. Следующие локальные ZIP-патчи устанавливает Updater.exe с проверкой версии/ABI/хешей, резервной копией и откатом. Комплекты нужно распаковывать целиком. Для встроенных бланков один раз требуется Microsoft WebView2 Runtime Evergreen x64.
 
-Перед обновлением остановите сервер и Креатор, сохраните копию data и своего конфига. Содержимое RepairCards-stage1 из архива обновляет существующий проект; рабочая база не включена. Готовые EXE находятся в ready-windows, исходники можно собирать в CLion + MinGW64. Схема SQLite обновляется автоматически, сохраняя карточки.
+Перед первым обновлением сервера остановите приложения, сохраните data, конфиг и LocalAppData/RepairCards. Схема обновляется до 4, существующие номера и документы сохраняются. В полном ZIP папка ready-windows содержит все программы; ее конфиг использует ../data/repair.sqlite3. Проверьте свой фактический путь базы.
 
-Проверены кросс-сборка трех Windows EXE, четыре группы C++ тестов, API, независимое распознавание QR и браузерный редактор. Реальный запуск новых окон в Windows, BarTender 10.1 и физическая Zebra S4M проверяются на пользовательском ПК — это не заявлено как уже выполненная проверка.
+[Проверки и их границы](repair-cards-stage1/VALIDATION.md) · [Windows CI](https://github.com/ausziehen1/123asd/actions/workflows/repair-cards-windows.yml?query=branch%3Arepair-cards-stage1)
 
-Контрольные суммы:
-
-- [Полный архив SHA-256](downloads/RepairCards-0.4.1-full.zip.sha256)
-- [Ридер SHA-256](downloads/RepairCards-0.4.1-reader-win64.zip.sha256)
-
-- [Креатор SHA-256](downloads/RepairCards-0.4.1-creator-win64.zip.sha256)
+SHA-256: [полный архив](downloads/RepairCards-0.5.0-full.zip.sha256), [Creator](downloads/RepairCards-0.5.0-creator-win64.zip.sha256), [Reader](downloads/RepairCards-0.5.0-reader-win64.zip.sha256), [Repair](downloads/RepairCards-0.5.0-repair-win64.zip.sha256).
 
 ## Предыдущие версии
 
-- [0.4 — QR и BarTender](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4-full.zip)
-
-- [0.3 — редактор](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-editor.zip)
-- [0.2 — Креатор](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-creator.zip)
-- [0.1 — сервер и SQLite](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage1.zip)
-
-[Исходники текущей версии](repair-cards-stage1).
+- [0.4.1](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4.1-full.zip)
+- [0.4](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-0.4-full.zip)
+- [0.3](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-editor.zip)
+- [0.2](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage2-creator.zip)
+- [0.1](https://github.com/ausziehen1/123asd/raw/refs/heads/repair-cards-stage1/downloads/RepairCards-stage1.zip)

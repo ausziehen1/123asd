@@ -4,8 +4,9 @@ $root = Split-Path $PSScriptRoot -Parent
 $build = (Resolve-Path $BuildDir).Path
 $test = Join-Path $env:TEMP ('RepairCardsSmoke-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $test | Out-Null
-$port = 18973
-$config = @{host='127.0.0.1';port=$port;database=(Join-Path $test 'smoke.sqlite3');template=(Join-Path $root 'templates/blank.xlsx');web=(Join-Path $root 'web')} | ConvertTo-Json
+$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
+$listener.Start();$port=$listener.LocalEndpoint.Port;$listener.Stop()
+$config = @{host='0.0.0.0';port=$port;database=(Join-Path $test 'smoke.sqlite3');template=(Join-Path $root 'templates/blank.xlsx');web=(Join-Path $root 'web')} | ConvertTo-Json
 $configPath = Join-Path $test 'config.json'
 [IO.File]::WriteAllText($configPath,$config)
 $server = $null
@@ -18,8 +19,9 @@ try {
  for($i=0;$i -lt 100;$i++) {try {$null=Invoke-RestMethod "$base/api/health";$ready=$true;break} catch {Start-Sleep -Milliseconds 100}}
  if(!$ready){throw 'Server did not start'}
  $platform=Invoke-RestMethod "$base/api/platforms" -Method Post -ContentType 'application/json' -Body '{"name":"Windows smoke"}'
- $body=@{platform_type_id=$platform.id;first_product_id='V00001';count=1}|ConvertTo-Json
+ $body=@{platform_type_id=$platform.id;first_product_id='V00001';count=10}|ConvertTo-Json
  $null=Invoke-RestMethod "$base/api/batches" -Method Post -ContentType 'application/json' -Body $body
+ if(Test-Path (Join-Path $build 'client_ui_tests.exe')){& (Join-Path $build 'client_ui_tests.exe') $base;if($LASTEXITCODE -ne 0){throw 'Native Creator allocation UI tests failed'}}
  $creator=Start-Process (Join-Path $build 'Creator.exe') -PassThru
  $clients += $creator
  $title=''
@@ -48,5 +50,6 @@ try {
 } finally {
  foreach($client in $clients){Stop-Process -Id $client.Id -ErrorAction SilentlyContinue}
  if($server){Stop-Process -Id $server.Id -ErrorAction SilentlyContinue}
+ if(Test-Path $diagnostic){Copy-Item $diagnostic (Join-Path $build 'viewer-diagnostic.json') -Force}
  Get-Content (Join-Path $test 'error.log') -ErrorAction SilentlyContinue
 }
