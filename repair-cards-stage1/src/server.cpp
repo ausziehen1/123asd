@@ -1,5 +1,6 @@
 #include "httplib.h"
 #include "store.h"
+#include "server_lock.h"
 #include "sequence.h"
 #include "document.h"
 #include "labels.h"
@@ -78,6 +79,7 @@ auto safe(Function function) {
         catch (const InputError& e) { send(response, {{"error", e.what()}}, 400); }
         catch (const repair::ApiError& e) { send(response, {{"error", e.what()}}, 400); }
         catch (const RevisionConflict& e) { send(response, {{"error", e.what()}}, 409); }
+        catch (const DatabaseBusy& e) { response.set_header("Retry-After", "2"); send(response, {{"error", e.what()}}, 503); }
         catch (const NotFound& e) { send(response, {{"error", e.what()}}, 404); }
         catch (const json::exception&) { send(response, {{"error", "Invalid JSON body or field types"}}, 400); }
         catch (const std::exception& e) {
@@ -119,6 +121,7 @@ int main(int argc, char** argv) {
             throw InputError("Template must be an XLSX ZIP file");
         if (workbook.size() > 10 * 1024 * 1024) throw InputError("Template exceeds 10 MiB");
         fs::create_directories(database.parent_path());
+        ServerDatabaseLock database_lock(database);
         Store store(database.u8string());
         if(store.setting("server_id").empty()){
             std::ostringstream identity;std::random_device random;
@@ -128,7 +131,7 @@ int main(int argc, char** argv) {
         auto configured_url=config.value("public_url",std::string());
         if(!configured_url.empty())store.set_setting("public_url",repair::normalize_public_url(configured_url),true);
         const bool local_only=host=="127.0.0.1"||host=="localhost"||host=="::1";
-        auto server_info=[&]{return json{{"version","0.5.0"},{"capabilities",json::array({"one_c_v1","embedded_view_v1"})},{"server_id",store.setting("server_id")},
+        auto server_info=[&]{return json{{"version","0.6.0"},{"capabilities",json::array({"one_c_v1","embedded_view_v1","multi_user_v1","batch_guard_v1","queued_save_v1","live_documents_v1"})},{"server_id",store.setting("server_id")},
             {"public_url",store.setting("public_url")},{"local_only",local_only},{"listen_host",host},{"port",port},
             {"suggested_urls",network_urls(port)}};};
         httplib::Server server;
@@ -144,7 +147,7 @@ int main(int argc, char** argv) {
             if(setsockopt(socket,SOL_SOCKET,option,reinterpret_cast<const char*>(&enabled),sizeof(enabled))!=0)
                 throw std::runtime_error("Cannot configure listening socket");
         });
-        server.new_task_queue = [] { return new httplib::ThreadPool(4); };
+        server.new_task_queue = [] { return new httplib::ThreadPool(8); };
         server.set_payload_max_length(26 * 1024 * 1024);
         server.set_read_timeout(10, 0);
         server.set_write_timeout(10, 0);
@@ -153,14 +156,14 @@ int main(int argc, char** argv) {
         server.Get(R"(/assets/([a-zA-Z0-9_.-]+))", safe([&](const auto& req, auto& res) {
             auto name = req.matches[1].str();
             if (name != "xspreadsheet.js" && name != "xspreadsheet.css" && name != "exceljs.min.js" &&
-                name != "locale-ru.js" && name != "editor.js" && name != "editor.css" &&
+                name != "locale-ru.js" && name != "editor.js" && name != "merge.js" && name != "editor.css" &&
                 name != "58eaeb4e52248a5c75936c6f4c33a370.svg") throw NotFound("Asset not found");
             auto type = name.size() >= 4 && name.substr(name.size()-4) == ".css" ? "text/css; charset=utf-8" :
                 (name.size() >= 4 && name.substr(name.size()-4) == ".svg" ? "image/svg+xml" : "application/javascript; charset=utf-8");
             res.set_content(read_file(web_root / "assets" / name), type);
         }));
         server.Get("/api/health", safe([&](const auto&, auto& res) {
-            send(res, {{"status", "ok"}, {"version", "0.5.0"}, {"sqlite", sqlite3_libversion()}});
+            send(res, {{"status", "ok"}, {"version", "0.6.0"}, {"schema", 5}, {"sqlite", sqlite3_libversion()}});
         }));
         server.Get("/api/server-info",safe([&](const auto&,auto& res){send(res,server_info());}));
         server.Post("/api/labels/cards",safe([&](const auto& req,auto& res){
@@ -171,6 +174,7 @@ int main(int argc, char** argv) {
             send(res,store.card_set(ids));
         }));
         server.Post("/api/labels/assign",safe([&](const auto& req,auto& res){auto body=json::parse(req.body);send(res,store.assign_codes(body.at("cards"),body.at("groups")));}));
+        server.Post("/api/labels/assign-queued",safe([&](const auto& req,auto& res){auto body=json::parse(req.body);send(res,store.assign_codes(body.at("cards"),body.at("groups"),true));}));
         server.Put("/api/settings/public-url",safe([&](const auto& req,auto& res){
             if(local_only)throw InputError("Для доступа по сети установите host = 0.0.0.0 в конфиге и перезапустите сервер.");
             auto body=json::parse(req.body);
@@ -195,8 +199,10 @@ int main(int argc, char** argv) {
         }));
         server.Post("/api/batches", safe([&](const auto& req, auto& res) {
             auto body = json::parse(req.body);
+            json options = json::object();
+            for (const auto* key : {"request_id", "expected_allocation_revision", "queued"}) if (body.contains(key)) options[key] = body[key];
             send(res, store.create_batch(integer_field(body, "platform_type_id"),
-                 body.at("first_product_id").template get<std::string>(), batch_count(body), workbook), 201);
+                 body.at("first_product_id").template get<std::string>(), batch_count(body), workbook, options), 201);
         }));
         server.Get("/api/cards", safe([&](const auto& req, auto& res) {
             auto platform = req.has_param("platform_type_id") ? number(req.get_param_value("platform_type_id")) : 0;
@@ -214,8 +220,13 @@ int main(int argc, char** argv) {
             res.set_content(store.workbook(id), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         }));
         server.Get(R"(/api/cards/([0-9]+)/document)", safe([&](const auto& req, auto& res) {
-            send(res, store.document(number(req.matches[1].str())));
+            if(req.has_param("after"))send(res,store.document_changes(number(req.matches[1].str()),number(req.get_param_value("after"))));
+            else send(res, store.document(number(req.matches[1].str())));
         }));
+        server.Post(R"(/api/cards/([0-9]+)/save)",safe([&](const auto& req,auto& res){auto body=json::parse(req.body);send(res,store.queue_document(number(req.matches[1].str()),integer_field(body,"revision"),body.at("base_document"),body.at("document"),body.at("request_id").template get<std::string>()));}));
+        server.Get(R"(/api/cards/([0-9]+)/history)",safe([&](const auto& req,auto& res){send(res,store.history(number(req.matches[1].str())));}));
+        server.Get(R"(/api/cards/([0-9]+)/history/([0-9]+)/workbook)",safe([&](const auto& req,auto& res){auto id=number(req.matches[1].str()),revision=number(req.matches[2].str());res.set_header("Content-Disposition","attachment; filename=card-"+std::to_string(id)+"-v"+std::to_string(revision)+".xlsx");res.set_content(store.history_workbook(id,revision),"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");}));
+        server.Post(R"(/api/cards/([0-9]+)/restore)",safe([&](const auto& req,auto& res){auto body=json::parse(req.body);send(res,store.restore_document(number(req.matches[1].str()),integer_field(body,"revision"),body.value("document",json(nullptr))));}));
         server.Put(R"(/api/cards/([0-9]+)/document)", safe([&](const auto& req, auto& res) {
             auto body = json::parse(req.body);
             auto bytes = decode_workbook(body.at("workbook_base64").template get<std::string>());
@@ -267,7 +278,7 @@ int main(int argc, char** argv) {
             if (res.body.empty()) send(res, {{"error", "Route not found"}}, res.status);
         });
         if(!server.bind_to_port(host,port))throw std::runtime_error("Cannot listen on configured host/port");
-        std::cout << "Repair Cards 0.5.0\nDatabase: " << database.u8string()
+        std::cout << "Repair Cards 0.6.0\nDatabase: " << database.u8string()
                   << "\nListen: http://" << host << ':' << port << "\nStop: Ctrl+C\n" << std::flush;
         if(host=="0.0.0.0")std::cout<<"Local browser: http://127.0.0.1:"<<port<<"\nQR address is configured in Creator.\n"<<std::flush;
         if (!server.listen_after_bind()) throw std::runtime_error("Server stopped unexpectedly");

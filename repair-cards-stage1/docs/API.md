@@ -110,3 +110,19 @@ POST `/api/labels/assign`:
 Ячейка JSON помечается `repairField: "one_c_code"`; ее положение переносится при структурных операциях редактора. XLSX использует именованную область RepairCards_OneCCode. Сохранение документа извлекает значение этой ячейки и обновляет колонку вместе с документом; все действует в рамках прежней проверки revision.
 
 `/api/server-info` добавляет capabilities `one_c_v1`, `embedded_view_v1`. Встроенные клиенты используют прежние `/cards/{id}` и `/edit/{id}` с `?embedded=1`. Режим Reader остается read; отдельной авторизации по ролям нет.
+
+## 0.6.0: FIFO, живое обновление и история
+
+Схема SQLite 5. Один сервер владеет базой; Store использует FIFO-блокировку, WAL и атомарные транзакции. Новые клиенты используют следующие операции (старый PUT document сохранен для совместимости со старой проверкой revision):
+
+- `POST /api/cards/{id}/save`: `{revision, base_document, document, request_id}`. Сервер сравнивает исходный снимок с локальным изменением и применяет только изменения поверх текущего документа. Разные ячейки объединяются, одинаковое свойство получает позднее значение. Структурное изменение листа применяет поздний лист целиком. Ответ `{revision, document, one_c_code, updated_at, queued, merged}` содержит фактически сохраненный объединенный документ. JSON/XLSX/1C/история записываются вместе. Повтор того же request_id возвращает прежний результат, не выполняя запись снова. Повтор ID с другими параметрами — ошибка входных данных.
+- `GET /api/cards/{id}/document?after=N`: `{changed:false,revision:N}` либо `{changed:true,revision,document,one_c_code,updated_at}`. Новые окна опрашивают раз в секунду и автоматически перебазируют местный несохраненный ввод. Активный редактор ячейки не прерывается.
+- `POST /api/labels/assign-queued`: прежние `cards:[{id,revision}], groups:[{count,code}]`; значения применяются к актуальным документам в очереди, без отказа из-за прежней revision. Вся группа атомарна.
+- `POST /api/batches`: дополнительно `request_id`, `queued:true`, `expected_allocation_revision`. При queued:true диапазон регистрируется как явно введен, даже если другой Creator успел изменить предложение счетчика. Повтор того же request_id не регистрирует вторую партию. Внешние Table ID по прежним требованиям не уникальны; Unique ID уникален.
+- `GET /api/cards/{id}/history`: последние 200 версий, поля revision/saved_at/one_c_code/reason. Все версии хранятся в SQLite.
+- `GET /api/cards/{id}/history/{revision}/workbook`: XLSX той версии.
+- `POST /api/cards/{id}/restore`: `{revision,document?}`. Выбранная версия становится новой версией текущей карточки, прежняя остается в истории. Для исходной версии с еще не материализованным JSON клиент дополнительно передает document, прочитанный из соответствующего исторического XLSX.
+
+`GET /api/health` включает schema:5. capabilities server-info включают queued_save_v1, live_documents_v1, multi_user_v1, batch_guard_v1. При занятости SQLite внешней программой после busy_timeout возвращается 503 с Retry-After; штатные клиенты к файлу базы не обращаются.
+
+`repair_backup --database source --output new-backup` выполняет онлайн-копию через SQLite Backup API и integrity_check. Рабочий сервер не останавливается; существующий файл назначения не перезаписывается.

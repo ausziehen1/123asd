@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='repair-qr-') as temp:
         process=start()
         # A second process must not share the port and serve another database.
         duplicate=subprocess.run([str(SERVER),'--config',str(config)],capture_output=True,timeout=10)
-        assert duplicate.returncode!=0 and b'Cannot listen' in duplicate.stdout+duplicate.stderr
+        assert duplicate.returncode!=0 and b'already owned' in duplicate.stdout+duplicate.stderr
         assert b'Listen:' not in duplicate.stdout
         info=call('/api/server-info');assert info['public_url']=='' and info['local_only'] is False
         original_id=info['server_id'];assert original_id

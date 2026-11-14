@@ -25,6 +25,8 @@ public:
     Json cards(long long platform, long long after = 0) const;
     Json preview(const std::string& first, int count) const;
     Json register_batch(long long platform, const std::string& first, int count) const;
+    Json register_batch(long long platform, const std::string& first, int count,
+                        long long expected_allocation_revision, const std::string& request_id) const;
 private:
     std::string base_;
     Json request(const std::string& path, const Json* body = nullptr, bool registration = false, bool put = false) const;

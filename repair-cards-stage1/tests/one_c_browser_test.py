@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='repair-onec-browser-') as temp:
    try:call('/api/health');break
    except urllib.error.URLError:time.sleep(.05)
   assert call('/api/cards/1')['one_c_code']=='0007'
-  with sqlite3.connect(db) as connection:assert connection.execute('PRAGMA user_version').fetchone()[0]==4
+  with sqlite3.connect(db) as connection:assert connection.execute('PRAGMA user_version').fetchone()[0]==5
   call('/api/batches',{'platform_type_id':1,'first_product_id':'V00001','count':10},status=201)
   selected=[{'id':n,'revision':0} for n in range(2,12)]
   groups=[{'count':2,'code':'123'},{'count':7,'code':'1234'},{'count':1,'code':'12345'}]

@@ -8,7 +8,7 @@
 #include <chrono>
 namespace {
 using namespace repair::win;
-enum Id{Base=100,Input,Open,Toggle};
+enum Id{Base=100,Input,Open,Toggle,Identity};
 struct Scanner{
  HWND window{},server_label{},base{},input{},open{},status{},identity{};HFONT font{};int dpi=96;
  bool repair=false,server_visible=true,busy=false,closing=false,connecting=false;std::future<repair::Json> future;
@@ -28,7 +28,7 @@ struct Scanner{
   auto qr=control(window,L"STATIC",L"QR / номер",0,-1,font);MoveWindow(qr,MulDiv(18,dpi,96),MulDiv(76,dpi,96),MulDiv(112,dpi,96),MulDiv(24,dpi,96),TRUE);
   input=control(window,L"EDIT",L"",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,Input,font);SendMessageW(input,EM_SETLIMITTEXT,1024,0);
   SendMessageW(input,EM_SETCUEBANNER,TRUE,reinterpret_cast<LPARAM>(L"Сканируйте QR · Enter — открыть"));
-  open=control(window,L"BUTTON",L"Открыть",WS_TABSTOP,Open,font);identity=control(window,L"STATIC",L"",0,-1,font);
+  open=control(window,L"BUTTON",L"Открыть",WS_TABSTOP,Open,font);identity=control(window,L"STATIC",L"",0,Identity,font);
   status=control(window,L"STATIC",repair?L"Сканируйте QR: бланк откроется в отдельном окне Repair для редактирования и сохранения.":L"Сканируйте QR: бланк откроется в отдельном окне Reader для просмотра.",0,-1,font);
   layout();show_server(!settings.value("server_confirmed",false));SetTimer(window,1,60,nullptr);apply_app_icon(window);install_update_menu(window);
  }

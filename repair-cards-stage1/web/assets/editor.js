@@ -11,20 +11,22 @@
   const saveButton = document.getElementById('save');
   const sheetSelect = document.getElementById('sheet-select');
   let cardInfo=null;
-  function renderIdentity(){if(cardInfo)document.getElementById('identity').textContent=`Тип платформы: ${cardInfo.platform_name} · Unique ID: ${cardInfo.id} · 1C Code: ${cardInfo.one_c_code || '—'}`;}
+  function renderIdentity(){if(cardInfo){document.getElementById('identity').textContent=`Тип платформы: ${cardInfo.platform_name} · Unique ID: ${cardInfo.id} · 1C Code: ${cardInfo.one_c_code || '—'}`;notify('identity',cardInfo);}}
   let spreadsheet, revision = 0, savedSnapshot = '', dirty = false, saving = false, loaded = false;
+  let polling=false,pendingRemote=null,pendingSave=null,liveOffline=false;
+  const mergeDocuments=window.RepairMerge.documents;
   const adaptedSheets = new WeakSet();
   const clone = value => JSON.parse(JSON.stringify(value));
   function message(value, kind = '') { status.textContent = value; status.className = kind; }
   async function request(path, options) {
-    const abort=new AbortController();const timeout=setTimeout(()=>abort.abort(),20000);let response;
+    const abort=new AbortController();const timeout=setTimeout(()=>abort.abort(),options?.method&&options.method!=='GET'?60000:20000);let response;
     try{response=await fetch(path,{cache:'no-store',...options,signal:abort.signal});}
-    catch(error){if(error.name==='AbortError')throw new TypeError('Сервер не ответил за 20 секунд.');throw error;}
+    catch(error){if(error.name==='AbortError')throw new TypeError('Сервер не ответил за отведенное время.');throw error;}
     finally{clearTimeout(timeout);}
     let data;
     try { data = await response.json(); } catch { throw new Error('Сервер вернул некорректный ответ.'); }
     if (!response.ok) {
-      if (response.status === 409) throw new Error('Бланк уже изменен в другом окне. Ваши правки оставлены в редакторе. Сначала проверьте сохраненную версию; автоматической перезаписи нет.');
+      if (response.status === 409) throw new Error(data.error || 'Обновите данные сервера.');
       throw new Error(data.error || `Ошибка сервера: ${response.status}`);
     }
     return data;
@@ -215,24 +217,66 @@
     if (changed && !dirty) message('Есть несохраненные изменения. Нажмите «Сохранить».', 'dirty');
     dirty = changed; saveButton.disabled = !dirty; notify('state',{dirty,saving});
   }
+  function editingCell(){const editor=spreadsheet?.sheet.editor;return !!editor&&editor.el.el.style.display!=='none';}
+  function setDocument(state){
+    if(spreadsheet.datas.length===state.sheets.length){state.sheets.forEach((sheet,i)=>spreadsheet.datas[i].setData(clone(sheet)));}
+    else spreadsheet.loadData(clone(state.sheets));
+    if(editable)prepareSheets();
+  }
+  function applyRemote(update){
+    const local=JSON.parse(snapshot()),base=update.base||JSON.parse(savedSnapshot);
+    const canonical=update.data.document;
+    const rebased=editable?mergeDocuments(base,canonical,local):canonical;
+    setDocument(canonical);savedSnapshot=snapshot();setDocument(rebased);
+    spreadsheet.sheet.resetData(spreadsheet.sheet.data);spreadsheet.reRender();
+    revision=update.data.revision;
+    if(cardInfo&&typeof update.data.one_c_code==='string'){cardInfo.one_c_code=update.data.one_c_code;renderIdentity();}
+    dirty=editable&&snapshot()!==savedSnapshot;if(!dirty)pendingSave=null;saveButton.disabled=!dirty;
+    message(dirty?'Данные обновлены. Ваши несохраненные правки сохранены в этом окне.':update.kind==='saved'?'Бланк сохранен.':'Получены актуальные данные с сервера.',dirty?'dirty':'');
+    notify('state',{dirty,saving});
+  }
+  async function remoteDocument(data){
+    if(data.document)return data;
+    const response=await fetch(`/api/cards/${id}/workbook`,{cache:'no-store'});
+    if(!response.ok)throw new Error('Не удалось загрузить Excel-бланк.');
+    const book=new ExcelJS.Workbook();await book.xlsx.load(await response.arrayBuffer());
+    return {...data,document:{format:'x-data-spreadsheet',version:1,sheets:book.worksheets.map(ws=>sheetFromExcel(ws,{...cardInfo,one_c_code:data.one_c_code},true))}};
+  }
+  async function pollRemote(){
+    if(!loaded||saving||polling||document.hidden)return;
+    if(pendingRemote){if(!editingCell()){applyRemote(pendingRemote);pendingRemote=null;}return;}
+    polling=true;
+    const since=revision;
+    try{
+      const data=await request(`/api/cards/${id}/document?after=${since}`);
+      if(liveOffline){liveOffline=false;message('Связь с сервером восстановлена.');}
+      if(data.changed){
+        const update={data:await remoteDocument(data),kind:'remote'};
+        // Do not commit or replace the text currently being typed.
+        if(saving||revision!==since)return;
+        if(editingCell())pendingRemote=update;else applyRemote(update);
+      }
+    }catch(error){liveOffline=true;message('Нет связи с сервером. Показана последняя загруженная версия; правки остаются в окне.','error');}
+    finally{polling=false;}
+  }
+  function token(){const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
   async function save() {
     if (!editable || saving || !loaded) return;
-    // Commit the cell editor before taking an immutable snapshot.
-    const editor = spreadsheet.sheet.editor;
-    if (editor) editor.clear();
-    const state = snapshot(), documentState = JSON.parse(state);
-    saving = true; saveButton.disabled = true; message('Сохраняем бланк…');
-    try {
-      const bytes = await workbookBytes(documentState);
-      const result = await request(`/api/cards/${id}/document`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision,document:documentState,workbook_base64:base64(bytes)})});
-      revision = result.revision; savedSnapshot = state; if(cardInfo && typeof result.one_c_code==='string'){cardInfo.one_c_code=result.one_c_code;renderIdentity();}
-      dirty = snapshot() !== state;
-      message(dirty ? 'Бланк сохранен. Есть новые несохраненные правки.' : 'Бланк сохранен.', dirty ? 'dirty' : '');
-    } catch (error) {
-      dirty = true;
-      message(error instanceof TypeError ? 'Нет ответа сервера. Правки остаются в этом окне. Сохранение могло завершиться — проверьте сохраненную версию перед повтором.' : error.message, 'error');
-    } finally { saving = false; saveButton.disabled = !dirty; notify('state',{dirty,saving}); }
-    return !dirty;
+    if(spreadsheet.sheet.editor)spreadsheet.sheet.editor.clear();
+    if(pendingRemote){applyRemote(pendingRemote);pendingRemote=null;}
+    const state=snapshot();
+    if(!pendingSave&&state===savedSnapshot){dirty=false;saveButton.disabled=true;return true;}
+    if(!pendingSave||!window.RepairMerge.equal(JSON.parse(pendingSave.snapshot),JSON.parse(state)))pendingSave={snapshot:state,body:{revision,base_document:JSON.parse(savedSnapshot),document:JSON.parse(state),request_id:token()}};
+    const submitted=pendingSave;
+    saving=true;saveButton.disabled=true;message('Сохраняем через очередь сервера…');
+    try{
+      const result=await request(`/api/cards/${id}/save`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(submitted.body)});
+      const update={data:result,base:submitted.body.document,kind:'saved'};
+      pendingSave=null;
+      if(editingCell())pendingRemote=update;else applyRemote(update);
+    }catch(error){dirty=true;message(error instanceof TypeError?'Нет ответа сервера. Правки остаются в окне. Повторное сохранение того же запроса не создаст вторую запись истории.':error.message,'error');}
+    finally{saving=false;saveButton.disabled=!dirty;notify('state',{dirty,saving});}
+    return !dirty&&!pendingRemote;
   }
   async function start() {
     try {
@@ -278,7 +322,10 @@
         state.sheets.forEach((sheet,index)=>{const option=document.createElement('option');option.value=String(index);option.textContent=sheet.name;sheetSelect.appendChild(option);});
         sheetSelect.addEventListener('change',()=>spreadsheet.sheet.resetData(spreadsheet.datas[Number(sheetSelect.value)]));
       } else sheetSelect.parentElement.hidden = true;
-      savedSnapshot = snapshot(); loaded = true; notify('state',{dirty:false,saving:false});
+      savedSnapshot = snapshot(); loaded = true; document.getElementById('export-draft').disabled=false; notify('state',{dirty:false,saving:false});
+      setInterval(pollRemote,1000);
+      window.addEventListener('online',pollRemote);
+      window.addEventListener('focus',pollRemote);
       spreadsheet.change(checkDirty);
       spreadsheet.on('cell-edited', checkDirty);
       if(embedded){
@@ -304,7 +351,38 @@
     } catch (error) { message('Не удалось открыть бланк: '+error.message, 'error'); }
   }
   saveButton.addEventListener('click',save);
+  const historyDialog=document.getElementById('history-dialog');
+  document.getElementById('history-close').addEventListener('click',()=>historyDialog.close());
+  async function downloadVersion(version){
+    const response=await fetch(`/api/cards/${id}/history/${version}/workbook`,{cache:'no-store'});if(!response.ok)throw new Error('Не удалось скачать версию.');
+    const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');link.href=url;link.download=`card-${id}-v${version}.xlsx`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  }
+  document.getElementById('history').addEventListener('click',async()=>{
+    try{
+      const versions=await request(`/api/cards/${id}/history`),list=document.getElementById('history-list');list.replaceChildren();
+      if(!versions.length)list.textContent='История появится после первого сохранения в новой версии программы.';
+      for(const version of versions){
+        const row=document.createElement('div');row.className='history-row';const label=document.createElement('span');label.textContent=`Версия ${version.revision} · ${version.saved_at} · ${version.reason}`;row.append(label);
+        const download=document.createElement('button');download.textContent='Скачать XLSX';download.addEventListener('click',()=>downloadVersion(version.revision).catch(error=>message(error.message,'error')));row.append(download);
+        if(editable){const restore=document.createElement('button');restore.textContent='Восстановить';restore.addEventListener('click',async()=>{
+          if(!confirm('Восстановить эту версию целиком? Текущая сохраненная версия останется в истории. Несохраненные правки в этом окне будут заменены.'))return;
+          try{const response=await fetch(`/api/cards/${id}/history/${version.revision}/workbook`,{cache:'no-store'});if(!response.ok)throw new Error('Версия не найдена.');const book=new ExcelJS.Workbook();await book.xlsx.load(await response.arrayBuffer());const restored={format:'x-data-spreadsheet',version:1,sheets:book.worksheets.map(ws=>sheetFromExcel(ws,{...cardInfo,one_c_code:version.one_c_code},true))};await request(`/api/cards/${id}/restore`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:version.revision,document:restored})});dirty=false;loaded=false;pendingSave=null;location.reload();}catch(error){message(error.message,'error');}
+        });row.append(restore);}list.append(row);
+      }
+      historyDialog.showModal();
+    }catch(error){message(error.message,'error');}
+  });
+  document.getElementById('export-draft').addEventListener('click',async()=>{
+    if(!editable||!loaded)return;
+    try{
+      if(spreadsheet.sheet.editor)spreadsheet.sheet.editor.clear();checkDirty();
+      const bytes=await workbookBytes(JSON.parse(snapshot()));
+      const url=URL.createObjectURL(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+      const link=document.createElement('a');link.href=url;link.download=`card-${id}-my-edits.xlsx`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+    }catch(error){message('Не удалось скачать правки: '+error.message,'error');}
+  });
   document.getElementById('reload').addEventListener('click',()=>{
+    if(editable&&loaded){if(spreadsheet.sheet.editor)spreadsheet.sheet.editor.clear();checkDirty();}
     if (!dirty || confirm('Открыть сохраненную версию? Несохраненные правки в этом окне будут потеряны.')) { dirty=false; loaded=false; location.reload(); }
   });
   document.addEventListener('keydown',event=>{if(editable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='s'){event.preventDefault();event.stopPropagation();save();}},true);

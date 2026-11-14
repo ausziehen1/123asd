@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <objbase.h>
 #include "api_client.h"
 #include "labels.h"
 #include "label_dialog_win.h"
@@ -12,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 using repair::Json;
 namespace {
@@ -128,8 +130,9 @@ enum Id { Server = 100, Connect, Platform, Add, First, Count, Preview, Register,
           Open, Refresh, Previous, Next, Labels, LastLabels, ScanInput };
 enum class Job { Connect, Add, Cards, Preview, ConfirmRegistration, Register, Labels, Scan };
 struct Batch {
-    std::string base, first, platform_name;
+    std::string base, first, platform_name, request_id;
     long long platform = 0;
+    long long allocation_revision = 0;
     int count = 0;
 };
 class App {
@@ -148,6 +151,9 @@ public:
     long long current_after = 0;
     std::vector<long long> history;
     std::future<Json> future;
+    std::future<Json> live_future;
+    ULONGLONG last_live=0;
+    unsigned long generation=0;
     Job job = Job::Connect;
     Batch pending;
 
@@ -278,6 +284,7 @@ public:
         return result;
     }
     void start(Job kind, std::function<Json()> action) {
+        ++generation;
         busy = true; job = kind; enable_controls(); set_text(status, L"Выполняется запрос к серверу…");
         try { future = std::async(std::launch::async, std::move(action)); }
         catch (...) { busy = false; enable_controls(); throw; }
@@ -293,7 +300,11 @@ public:
     Batch read_batch() const {
         Batch b; b.base = base(); b.platform = selected_platform(); b.first = utf8(text(first));
         if (b.platform <= 0) throw repair::ApiError("Выберите тип платформы.");
-        for (const auto& p : platforms) if (p.at("id").get<long long>() == b.platform) b.platform_name = p.at("name").get<std::string>();
+        for (const auto& p : platforms) if (p.at("id").get<long long>() == b.platform) {
+            b.platform_name = p.at("name").get<std::string>(); b.allocation_revision = p.at("allocation_revision").get<long long>();
+        }
+        GUID uuid{};if(FAILED(CoCreateGuid(&uuid)))throw repair::ApiError("Не удалось создать номер запроса.");
+        wchar_t token[40]{};StringFromGUID2(uuid,token,40);b.request_id=utf8(std::wstring(token+1,36));
         auto number = text(count);
         if (number.empty() || number.size() > 4 || number.find_first_not_of(L"0123456789") != std::wstring::npos)
             throw repair::ApiError("Количество должно быть целым числом от 1 до 1000.");
@@ -312,7 +323,7 @@ public:
         if (id == Connect) {
             auto url = repair::normalize_server_url(utf8(text(server)));
             start(Job::Connect, [url] {
-                repair::ApiClient api(url); api.health();auto info=api.server_info();if(!info.contains("capabilities"))throw repair::ApiError("Обновите сервер до версии 0.5.0 перед запуском этого Creator.");
+                repair::ApiClient api(url); api.health();auto info=api.server_info();auto capabilities=info.value("capabilities",Json::array());if(std::find(capabilities.begin(),capabilities.end(),"batch_guard_v1")==capabilities.end())throw repair::ApiError("Обновите сервер до версии 0.6.0 перед запуском этого Creator.");
                 return Json{{"base", url}, {"platforms", api.platforms()}, {"cards", api.cards(0)}, {"info",api.server_info()}};
             });
         } else if (id == Add) {
@@ -379,13 +390,13 @@ public:
                 if (MessageBoxW(window, message.c_str(), L"Регистрация партии", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) {
                     auto snapshot = pending;
                     start(Job::Register, [snapshot] {
-                        return repair::ApiClient(snapshot.base).register_batch(snapshot.platform, snapshot.first, snapshot.count);
+                        return repair::ApiClient(snapshot.base).register_batch(snapshot.platform, snapshot.first, snapshot.count, snapshot.allocation_revision, snapshot.request_id);
                     });
                 }
             }
         } else if (kind == Job::Register) {
             auto next_id = result.at("next_product_id").get<std::string>();
-            for (auto& p : platforms) if (p.at("id").get<long long>() == pending.platform) p["next_product_id"] = next_id;
+            for (auto& p : platforms) if (p.at("id").get<long long>() == pending.platform) {p["next_product_id"] = next_id;p["allocation_revision"]=result.at("allocation_revision");}
             set_text(first, wide(next_id));
             last_batch=result.at("cards");last_batch_server=server_id;
             for(auto& row:last_batch){row["platform_name"]=pending.platform_name;row["platform_type_id"]=pending.platform;}
@@ -404,6 +415,7 @@ public:
         }
     }
     void poll() {
+        poll_live();
         if (!busy || !future.valid() || future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
         auto kind = job;
         try {
@@ -415,6 +427,21 @@ public:
             if (closing) { DestroyWindow(window); return; }
             show_error(e.what()); enable_controls();
         }
+    }
+    void poll_live(){
+        if(live_future.valid()&&live_future.wait_for(std::chrono::milliseconds(0))==std::future_status::ready){
+            try{
+                auto result=live_future.get();
+                if(busy||closing||!IsWindowEnabled(window)||result.at("generation").get<unsigned long>()!=generation||result.at("platform").get<long long>()!=selected_platform()||result.at("after").get<long long>()!=current_after||result.at("base").get<std::string>()!=connected_base)return;
+                std::vector<long long> selected;int index=-1;while((index=ListView_GetNextItem(list,index,LVNI_SELECTED))>=0)selected.push_back(cards.at(index).at("id").get<long long>());
+                auto entered=text(first);std::wstring suggestion;for(const auto& p:platforms)if(p.at("id").get<long long>()==selected_platform())suggestion=wide(p.value("next_product_id",std::string()));
+                auto platform_id=selected_platform();platforms=result.at("platforms");fill_platforms(platform_id);if(!entered.empty()&&entered!=suggestion)set_text(first,entered);
+                render_cards(result.at("cards"));for(size_t i=0;i<cards.size();i++)if(std::find(selected.begin(),selected.end(),cards[i].at("id").get<long long>())!=selected.end())ListView_SetItemState(list,static_cast<int>(i),LVIS_SELECTED,LVIS_SELECTED);enable_controls();
+            }catch(const std::exception&){set_text(status,L"Нет связи с сервером. Показан последний загруженный список; повторяем подключение.");}
+        }
+        if(live_future.valid()||busy||closing||connected_base.empty()||!IsWindowEnabled(window)||GetTickCount64()-last_live<3000)return;
+        last_live=GetTickCount64();auto url=connected_base;auto platform_id=selected_platform();auto after=current_after;auto stamp=generation;
+        live_future=std::async(std::launch::async,[url,platform_id,after,stamp]{repair::ApiClient api(url);return Json{{"base",url},{"platform",platform_id},{"after",after},{"generation",stamp},{"platforms",api.platforms()},{"cards",api.cards(platform_id,after)}};});
     }
     void show_error(const std::string& message) {
         auto value = wide(message);

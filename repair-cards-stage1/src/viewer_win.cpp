@@ -23,7 +23,7 @@ struct Viewer:std::enable_shared_from_this<Viewer>{
  HWND window{},owner{},status{};std::wstring url,pending_url;bool editable=false,dirty=false,waiting_save=false,checking_close=false,close_owner_when_done=false;
  ICoreWebView2Controller* controller{};ICoreWebView2* web{};
  ~Viewer(){if(controller)controller->Close();if(web)web->Release();if(controller)controller->Release();}
- void diagnostic(nlohmann::json data){wchar_t flag[8]{};if(GetEnvironmentVariableW(L"REPAIRCARDS_DIAGNOSTICS",flag,8)&&std::wstring(flag)==L"1")try{data["editable"]=editable;data["url"]=utf8(url);save_profile("viewer-diagnostic.json",data);}catch(...){} }
+ void diagnostic(nlohmann::json data){wchar_t flag[8]{};if(GetEnvironmentVariableW(L"REPAIRCARDS_DIAGNOSTICS",flag,8)&&std::wstring(flag)==L"1")try{data["editable"]=editable;data["url"]=utf8(url);data["pid"]=GetCurrentProcessId();save_profile("viewer-"+std::to_string(GetCurrentProcessId())+".json",data);save_profile("viewer-diagnostic.json",data);}catch(...){} }
  void error(const std::wstring& text){SetWindowTextW(status,text.c_str());ShowWindow(status,SW_SHOW);diagnostic({{"event","error"},{"message",utf8(text)}});}
  void fit(int width,int height){MONITORINFO monitor{};monitor.cbSize=sizeof(monitor);GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor);auto area=monitor.rcWork;HDC dc=GetDC(window);int dpi=GetDeviceCaps(dc,LOGPIXELSX);ReleaseDC(window,dc);RECT rect{0,0,MulDiv(std::clamp(width,600,1800),dpi,96),MulDiv(std::clamp(height,400,1400),dpi,96)};AdjustWindowRectEx(&rect,static_cast<DWORD>(GetWindowLongPtrW(window,GWL_STYLE)),FALSE,0);int w=std::min(static_cast<int>(area.right-area.left),static_cast<int>(rect.right-rect.left));int h=std::min(static_cast<int>(area.bottom-area.top),static_cast<int>(rect.bottom-rect.top));SetWindowPos(window,nullptr,area.left+(area.right-area.left-w)/2,area.top+(area.bottom-area.top-h)/2,w,h,SWP_NOZORDER|SWP_NOACTIVATE);}
 
@@ -52,6 +52,9 @@ struct Viewer:std::enable_shared_from_this<Viewer>{
      LPWSTR value=nullptr;args->get_WebMessageAsJson(&value);auto text=value?utf8(value):"";CoTaskMemFree(value);auto data=nlohmann::json::parse(text,nullptr,false);if(!data.is_object())return S_OK;
      if(data.value("type","")=="ready"){auto title=repair::win::text(v->owner)+L" — "+wide(data.value("title",std::string("Бланк")));SetWindowTextW(v->window,title.c_str());v->fit(data.value("width",1100),data.value("height",800));v->diagnostic({{"event","ready"},{"title",data.value("title",std::string())},{"mode",data.value("mode",std::string())}});}
      if(data.value("type","")=="state")v->dirty=data.value("dirty",false)||data.value("saving",false);
+     if(data.value("type","")=="identity"&&repair::win::text(v->owner)!=L"Creator"){
+      auto identity=GetDlgItem(v->owner,104);if(identity)set_text(identity,wide(data.value("product_id",std::string())+" · "+data.value("platform_name",std::string())+" · Unique ID: "+std::to_string(data.value("id",0LL))+" · 1C Code: "+data.value("one_c_code",std::string())));
+     }
      if(data.value("type","")=="save-close"){v->waiting_save=false;if(!data.value("ok",false)){v->close_owner_when_done=false;v->pending_url.clear();}if(data.value("ok",false)){v->dirty=false;if(v->pending_url.empty()||v->close_owner_when_done)DestroyWindow(v->window);else{v->url=v->pending_url;v->pending_url.clear();v->web->Navigate(v->url.c_str());}}}
      return S_OK;});
     s->web->add_WebMessageReceived(message,&token);message->Release();
@@ -59,7 +62,7 @@ struct Viewer:std::enable_shared_from_this<Viewer>{
    });
    auto hr=environment->CreateCoreWebView2Controller(self->window,completed);completed->Release();if(FAILED(hr))self->error(L"Ошибка создания WebView2.");return S_OK;
   });
-  auto role=repair::win::text(owner);if(role!=L"Creator"&&role!=L"Reader"&&role!=L"Repair")role=L"Viewer";auto folder=profile_directory()/L"WebView2"/role;
+  auto role=repair::win::text(owner);if(role!=L"Creator"&&role!=L"Reader"&&role!=L"Repair")role=L"Viewer";auto folder=profile_directory()/L"WebView2"/role/(L"process-"+std::to_wstring(GetCurrentProcessId()));
   auto hr=create(nullptr,folder.c_str(),nullptr,env);env->Release();if(FAILED(hr))error(L"WebView2 Runtime не найден или недоступен. Установите Evergreen Runtime x64. Код: "+std::to_wstring(static_cast<unsigned long>(hr)));
  }
  bool close_confirmed(){if(waiting_save)return false;if(editable&&dirty){auto choice=MessageBoxW(window,L"Сохранить изменения перед закрытием бланка?",L"Repair",MB_YESNOCANCEL|MB_ICONQUESTION);if(choice==IDCANCEL){close_owner_when_done=false;return false;}if(choice==IDYES){if(web){waiting_save=true;web->ExecuteScript(L"window.repairSaveAndClose && window.repairSaveAndClose()",nullptr);}return false;}}DestroyWindow(window);return true;}

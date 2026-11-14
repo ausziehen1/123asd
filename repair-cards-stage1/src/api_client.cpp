@@ -21,7 +21,7 @@ ApiClient::ApiClient(std::string server_url) : base_(normalize_server_url(std::m
 Json ApiClient::request(const std::string& path, const Json* body, bool registration, bool put) const {
     httplib::Client client(base_);
     client.set_connection_timeout(2, 0);
-    client.set_read_timeout(5, 0);
+    client.set_read_timeout(registration ? 60 : 5, 0);
     client.set_write_timeout(5, 0);
     auto response = body ? (put?client.Put(path,body->dump(),"application/json; charset=utf-8"):
         client.Post(path, body->dump(), "application/json; charset=utf-8")) : client.Get(path);
@@ -50,7 +50,7 @@ Json ApiClient::health() const {
         throw ApiError("По этому адресу не найден работающий сервер карточек.");
     return data;
 }
-Json ApiClient::assign_codes(const Json& cards,const Json& groups) const {Json body={{"cards",cards},{"groups",groups}};try{return request("/api/labels/assign",&body,true);}catch(const RegistrationUncertain&){throw ApiError("Ответ на распределение кодов 1С не получен. Изменения могли сохраниться. Закройте окно подготовки QR и откройте выбранные карточки заново перед повтором.");}}
+Json ApiClient::assign_codes(const Json& cards,const Json& groups) const {Json body={{"cards",cards},{"groups",groups}};try{return request("/api/labels/assign-queued",&body,true);}catch(const RegistrationUncertain&){throw ApiError("Ответ на распределение кодов 1С не получен. Изменения могли сохраниться. Закройте окно подготовки QR и откройте выбранные карточки заново перед повтором.");}}
 Json ApiClient::platforms() const { return request("/api/platforms"); }
 Json ApiClient::server_info() const { return request("/api/server-info"); }
 Json ApiClient::card(long long id) const { return request("/api/cards/"+std::to_string(id)); }
@@ -74,6 +74,12 @@ Json ApiClient::preview(const std::string& first, int count) const {
 }
 Json ApiClient::register_batch(long long platform, const std::string& first, int count) const {
     Json body = {{"platform_type_id", platform}, {"first_product_id", first}, {"count", count}};
+    return request("/api/batches", &body, true);
+}
+Json ApiClient::register_batch(long long platform, const std::string& first, int count,
+                                long long expected_allocation_revision, const std::string& request_id) const {
+    Json body = {{"platform_type_id", platform}, {"first_product_id", first}, {"count", count},
+                 {"expected_allocation_revision", expected_allocation_revision}, {"request_id", request_id}, {"queued",true}};
     return request("/api/batches", &body, true);
 }
 }

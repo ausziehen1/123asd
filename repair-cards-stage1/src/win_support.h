@@ -5,6 +5,8 @@
 #include <fstream>
 #include <string>
 #include <atomic>
+#include <thread>
+#include <chrono>
 #include "json.hpp"
 #include "ui_theme_win.h"
 
@@ -20,5 +22,5 @@ inline HWND control(HWND parent,const wchar_t* type,const wchar_t* label,DWORD s
 inline std::filesystem::path executable_directory(){std::wstring path(32768,L'\0');auto n=GetModuleFileNameW(nullptr,path.data(),static_cast<DWORD>(path.size()));if(!n||n==path.size())throw std::runtime_error("Cannot resolve executable path");path.resize(n);return std::filesystem::path(path).parent_path();}
 inline std::filesystem::path profile_directory(){PWSTR path=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData,0,nullptr,&path)))throw std::runtime_error("Cannot access LocalAppData");auto out=std::filesystem::path(path)/L"RepairCards";CoTaskMemFree(path);std::filesystem::create_directories(out);return out;}
 inline nlohmann::json load_profile(const std::string& name){auto path=profile_directory()/name;std::ifstream in(path);if(!in)return nlohmann::json::object();auto data=nlohmann::json::parse(in,nullptr,false);return data.is_object()?data:nlohmann::json::object();}
-inline void save_profile(const std::string& name,const nlohmann::json& data){auto path=profile_directory()/name,tmp=path;static std::atomic<unsigned long> sequence{0};tmp+=L"."+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(sequence.fetch_add(1))+L".tmp";{std::ofstream out(tmp,std::ios::binary);auto value=data.dump(2);if(!out||!out.write(value.data(),static_cast<std::streamsize>(value.size())))throw std::runtime_error("Cannot write settings");}if(!MoveFileExW(tmp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot save settings");}
+inline void save_profile(const std::string& name,const nlohmann::json& data){auto path=profile_directory()/name,tmp=path;static std::atomic<unsigned long> sequence{0};tmp+=L"."+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(sequence.fetch_add(1))+L".tmp";{std::ofstream out(tmp,std::ios::binary);auto value=data.dump(2);if(!out||!out.write(value.data(),static_cast<std::streamsize>(value.size())))throw std::runtime_error("Cannot write settings");}for(int attempt=0;;++attempt){if(MoveFileExW(tmp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))break;auto code=GetLastError();if(attempt>=20||(code!=ERROR_SHARING_VIOLATION&&code!=ERROR_LOCK_VIOLATION)){std::error_code ignored;std::filesystem::remove(tmp,ignored);throw std::runtime_error("Cannot save settings");}std::this_thread::sleep_for(std::chrono::milliseconds(25));}}
 }

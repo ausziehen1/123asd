@@ -10,6 +10,7 @@
   <script src="/assets/xspreadsheet.js" defer></script>
   <script src="/assets/locale-ru.js" defer></script>
   <script src="/assets/exceljs.min.js" defer></script>
+  <script src="/assets/merge.js" defer></script>
   <script src="/assets/editor.js" defer></script>
 </head>
 <body class="{{MODE_CLASS}}" data-card-id="{{CARD_ID}}" data-mode="{{MODE}}">
@@ -18,11 +19,14 @@
     <button id="save" class="edit-only" disabled>Сохранить</button>
     <button id="insert-row" class="edit-only">Вставить строку</button>
     <button id="insert-column" class="edit-only">Вставить столбец</button>
+    <button id="export-draft" class="edit-only" disabled>Скачать мои правки (XLSX)</button>
     <button id="reload">Открыть сохраненную версию</button>
+    <button id="history">История</button>
     <label>Лист: <select id="sheet-select" aria-label="Лист"></select></label>
   </div>
   <div id="state" role="status" aria-live="polite">Загружаем бланк…</div>
   <div id="spreadsheet"></div>
+  <dialog id="history-dialog"><h2>История бланка</h2><p>Каждое сохранение проходит через очередь. Более позднее изменение одной ячейки заменяет предыдущее.</p><div id="history-list"></div><button id="history-close">Закрыть</button></dialog>
   <div class="hint edit-only">Двойной щелчок по ячейке — ввод. Правая кнопка — операции со строками и столбцами. Ctrl+S — сохранить.</div>
   <noscript>Для открытия бланка включите JavaScript в браузере.</noscript>
 </body>

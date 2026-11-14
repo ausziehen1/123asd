@@ -66,7 +66,7 @@ struct Dialog {
                 auto seed=root/L"labels"/L"TEST-original.btw";
                 if(std::filesystem::is_regular_file(seed)){
                     std::filesystem::create_directories(destination.parent_path());
-                    std::filesystem::copy_file(seed,destination,std::filesystem::copy_options::none);break;
+                    std::filesystem::copy_file(seed,destination,std::filesystem::copy_options::skip_existing);break;
                 }
             }
         }
@@ -208,7 +208,13 @@ struct Dialog {
         auto exe=std::filesystem::absolute(std::filesystem::path(text(exe_edit))),btw=std::filesystem::absolute(std::filesystem::path(text(btw_edit)));
         if(!std::filesystem::is_regular_file(exe))throw repair::ApiError("Укажите существующий bartend.exe кнопкой «Обзор».");
         if(!std::filesystem::is_regular_file(btw))throw repair::ApiError("Укажите существующий шаблон .btw.");
-        if(printing&&job.empty())throw repair::ApiError("Сначала нажмите «Подготовить QR».");
+        if(printing&&job.empty())throw repair::ApiError("Сначала нажмите «Сформировать QR».");
+        if(printing){
+            // Different Creators must not rebind one open BarTender document
+            // to each other's CSV. Each print invocation opens its own snapshot.
+            auto snapshot=job/(L"RepairCards-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64())+L".btw");
+            std::filesystem::copy_file(btw,snapshot,std::filesystem::copy_options::none);btw=snapshot;
+        }
         preferences();std::vector<std::wstring> args;
         for(const auto& arg:repair::bartender_arguments(btw.u8string(),job.empty()?std::string():(job/"labels.csv").u8string(),printing))args.push_back(wide(arg));
         auto command=repair::bartender_command_line(exe.wstring(),args);

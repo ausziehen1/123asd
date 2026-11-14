@@ -122,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix='repair-editor-') as directory:
             assert book.active['G10'].value == 'Не включается. Проверка питания.'
             assert book.active['G10'].font.bold is True
             stored=get('/api/cards/1/document'); assert stored['revision']==2
-            # Two editors: the second must not overwrite an already saved revision.
+            # Two editors: later queued changes to the same cell win automatically.
             stale=context.new_page();stale.goto(BASE+'/edit/1')
             expect(stale.locator('#state')).to_contain_text('Бланк открыт')
             choose(page,10,6,double=True);page.locator('.x-spreadsheet-editor textarea').fill('Проверка завершена')
@@ -130,8 +130,8 @@ with tempfile.TemporaryDirectory(prefix='repair-editor-') as directory:
             expect(page.locator('#state')).to_have_text('Бланк сохранен.')
             choose(stale,10,6,double=True);stale.locator('.x-spreadsheet-editor textarea').fill('Устаревшая правка')
             expect(stale.locator('#save')).to_be_enabled();stale.locator('#save').click()
-            expect(stale.locator('#state')).to_contain_text('Бланк уже изменен')
-            assert get('/api/cards/1/document')['document']['sheets'][0]['rows']['10']['cells']['6']['text']=='Проверка завершена'
+            expect(stale.locator('#state')).to_have_text('Бланк сохранен.')
+            assert get('/api/cards/1/document')['document']['sheets'][0]['rows']['10']['cells']['6']['text']=='Устаревшая правка'
             assert stale.evaluate('repairSheet.cell(10,6).text')=='Устаревшая правка'
             # Read-only view uses the saved document and has no edit controls.
             reader=context.new_page();reader.goto(BASE+'/cards/1')
@@ -139,7 +139,7 @@ with tempfile.TemporaryDirectory(prefix='repair-editor-') as directory:
             expect(reader.locator('#save')).not_to_be_visible()
             expect(reader.locator('#insert-row')).not_to_be_visible()
             assert reader.evaluate('repairSheet.sheet.data.settings.mode')=='read'
-            assert reader.evaluate('repairSheet.cell(10,6).text')=='Проверка завершена'
+            assert reader.evaluate('repairSheet.cell(10,6).text')=='Устаревшая правка'
             choose(reader,10,6,double=True)
             expect(reader.locator('.x-spreadsheet-editor textarea')).not_to_be_visible()
             reader.set_viewport_size({'width':390,'height':844})
@@ -149,11 +149,11 @@ with tempfile.TemporaryDirectory(prefix='repair-editor-') as directory:
             assert not page_errors,page_errors
             browser.close()
         process.terminate();process.wait(timeout=10);process=start()
-        assert get('/api/cards/1/document')['revision']==3
+        assert get('/api/cards/1/document')['revision']==4
         book=load_workbook(io.BytesIO(get('/api/cards/1/workbook',raw=True)))
-        assert book.active['G11'].value=='Проверка завершена'
+        assert book.active['G11'].value=='Устаревшая правка'
         assert len(get('/api/cards'))==2
-        print('Editor browser tests passed: migration, real input, row/column insertion, formatting, XLSX, conflict, read-only, mobile, restart')
+        print('Editor browser tests passed: migration, real input, row/column insertion, formatting, XLSX, queued overwrite, read-only, mobile, restart')
     finally:
         if process is not None and process.poll() is None: process.terminate();process.wait(timeout=10)
         log.close()

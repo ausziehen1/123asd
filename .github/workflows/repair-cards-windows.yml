@@ -5,7 +5,10 @@ on:
     paths:
       - 'repair-cards-stage1/src/**'
       - 'repair-cards-stage1/tests/**'
-      - 'repair-cards-stage1/scripts/ci_windows_smoke.ps1'
+      - 'repair-cards-stage1/scripts/**'
+      - 'repair-cards-stage1/docs/USER_GUIDE.md'
+      - 'downloads/RepairCards-0.6.0-full.zip'
+      - 'downloads/0.6.0/**'
       - 'repair-cards-stage1/CMakeLists.txt'
       - 'repair-cards-stage1/third_party/**'
       - 'repair-cards-stage1/resources/**'
@@ -48,14 +51,30 @@ jobs:
       - name: Native windows and embedded Reader/Repair smoke
         shell: pwsh
         run: ./repair-cards-stage1/scripts/ci_windows_smoke.ps1 -BuildDir ./windows-build
+      - name: Concurrent native clients
+        shell: pwsh
+        run: ./repair-cards-stage1/scripts/ci_windows_multi.ps1 -BuildDir ./windows-build -ClientDir ./windows-build
+      - name: Concurrent single-file clients
+        shell: pwsh
+        run: ./repair-cards-stage1/scripts/ci_windows_multi.ps1 -BuildDir ./windows-build -ClientDir ./windows-build/portable -Portable
       - name: Released Windows EXEs smoke
         shell: pwsh
         run: |
-          $archive = 'downloads/RepairCards-0.5.0-full.zip'
+          $archive = 'downloads/RepairCards-0.6.0-full.zip'
           if (Test-Path $archive) {
             Expand-Archive $archive -DestinationPath ready-smoke
             Copy-Item ./windows-build/client_ui_tests.exe ./ready-smoke/RepairCards-stage1/ready-windows/
             ./repair-cards-stage1/scripts/ci_windows_smoke.ps1 -BuildDir ./ready-smoke/RepairCards-stage1/ready-windows
+            ./repair-cards-stage1/scripts/ci_windows_multi.ps1 -BuildDir ./ready-smoke/RepairCards-stage1/ready-windows -ClientDir ./ready-smoke/RepairCards-stage1/clients -Portable
+          }
+      - name: Released DLL patch and rollback
+        shell: pwsh
+        run: |
+          $patch = 'downloads/RepairCards-0.5.0-to-0.6.0-client-patch.zip'
+          if (Test-Path $patch) {
+            Expand-Archive downloads/RepairCards-0.5.0-creator-win64.zip -DestinationPath old-client
+            & ./windows-build/release_patch_tests.exe ./old-client/RepairCards-Creator-win64 $patch
+            if ($LASTEXITCODE -ne 0) { throw 'Actual released DLL patch failed' }
           }
       - uses: actions/upload-artifact@v4
         if: always()
